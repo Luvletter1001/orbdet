@@ -109,6 +109,27 @@ class H2RBoxV2Head(RotatedFCOSHead):
         self.use_standalone_angle = use_standalone_angle
         self.use_reweighted_loss_bbox = use_reweighted_loss_bbox
 
+    @staticmethod
+    def _compact_integer_labels(labels: Tensor, group_index: Tensor,
+                                num_groups: int) -> Tensor:
+        """Average identical group labels without integer ``index_reduce``.
+
+        PyTorch 1.12 does not implement CUDA ``index_reduce`` for ``Long``
+        tensors. Labels belonging to one bid are identical, so they can be
+        represented exactly as float32 while averaging and converted back to
+        the original integer dtype afterwards.
+        """
+        float_labels = labels.to(dtype=torch.float32)
+        compacted = torch.empty(
+            (num_groups, ), dtype=float_labels.dtype,
+            device=labels.device).index_reduce_(
+                0,
+                group_index,
+                float_labels,
+                'mean',
+                include_self=False)
+        return compacted.round().to(dtype=labels.dtype)
+
     def obb2xyxy(self, rbboxes):
         w = rbboxes[:, 2::5]
         h = rbboxes[:, 3::5]
@@ -343,11 +364,8 @@ class H2RBoxV2Head(RotatedFCOSHead):
                 compacted_angle_preds, keepdim=False)
             compacted_agnostic_mask = None
             if self.rotation_agnostic_classes:
-                compacted_labels = torch.empty(
-                    bid.shape, dtype=pos_labels.dtype,
-                    device=bid.device).index_reduce_(
-                        0, idx, pos_labels, 'mean',
-                        include_self=False)[bmsk].view(-1, 3)[:, 0]
+                compacted_labels = self._compact_integer_labels(
+                    pos_labels, idx, bid.numel())[bmsk].view(-1, 3)[:, 0]
                 compacted_agnostic_mask = self._get_rotation_agnostic_mask(
                     compacted_labels)
 
