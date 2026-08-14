@@ -12,15 +12,20 @@ baseline_seed3407_best_val_mAP: 0.9029
 baseline_seed42_status: running
 baseline_seed42_started_at: 2026-08-15T03:26:55+08:00
 baseline_seed2026_status: queued
-godc_code_status: tests_passed_63
+godc_code_status: tests_passed_67
 godc_smoke_status: armed_after_multiseed_success
 godc_formal_status: armed_after_smoke_success
+dota_v1_code_status: tests_passed_67
+dota_v1_smoke_status: armed_after_godc_success
+dota_v1_formal_status: armed_after_smoke_success
 held_out_test_policy: forbidden_until_model_freeze
 v02_worktree: /data1/zcy/Orbdet/.worktrees/v02-stability
 godc_worktree: /data1/zcy/Orbdet/.worktrees/godc-integration
 v02_tmux_session: orbdet_v02_multiseed_gpu89_20260815
 godc_controller_tmux_session: orbdet_godc_after_v02_gpu89_20260815
-updated_at: 2026-08-15T03:35:07+08:00
+dota_v1_worktree: /data1/zcy/Orbdet/.worktrees/dota-v1-formal
+dota_v1_controller_tmux_session: orbdet_v02_dota1_after_godc_gpu89_20260815
+updated_at: 2026-08-15T03:45:09+08:00
 ---
 
 # 正式训练状态
@@ -45,7 +50,7 @@ epoch 103。最佳 clean validation 是 epoch 48 的 mAP `0.9029`、AP50
 
 ## 已布防的任务 2
 
-GODC 的 HBox/FPN `C2` 接入已通过项目 `tests/` 全量 63 项测试。独立控制器
+GODC 的 HBox/FPN `C2` 接入已通过项目 `tests/` 全量测试。独立控制器
 当前只等待任务 1 的 `COMPLETE` 标记，不占用 GPU。任务 1 成功后，它将：
 
 1. 运行 8 图、双 rank、2 optimizer-step smoke；
@@ -53,4 +58,10 @@ GODC 的 HBox/FPN `C2` 接入已通过项目 `tests/` 全量 63 项测试。独�
 3. 仅在 smoke 成功后启动 seed 3407 的 103E clean-HRSC 正式训练；
 4. 任一阶段失败即写 `FAILED` 并停止，不会结束其他用户进程。
 
-任务 3（DOTA-v1）保持授权但优先级较低，不会插到任务 1、2 之间。
+## 已布防的任务 3
+
+Orbdet-v0.2 DOTA-v1 1× 合同已通过项目全量 67 项测试。数据源含 20,995 对
+trainval 文件，官方 `filter_empty_gt=True` 后有效训练样本为 12,757；隐藏 test
+不用于本次训练。第三个控制器当前等待任务 2 `COMPLETE`，之后自动执行 8 图
+双卡 smoke，并仅在生成 `epoch_1.pth` 后启动 1024 输入、global batch 4、12E
+正式训练。任务 3 不会插到任务 1、2 之间。
