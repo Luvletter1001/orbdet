@@ -24,7 +24,8 @@ Alternatives rejected for this run:
 ## Data contract
 
 - Read-only source: `/data1/zcy/Orbdet/data/DOTA-v1.0/`.
-- Prepared trainval: 20,995 image/annotation pairs at 1024-patch scale.
+- Prepared trainval: 20,995 image/annotation pairs at 1024-patch scale;
+  12,757 contain at least one object and 8,238 are empty patches.
 - Hidden test: 10,833 image patches with no local labels.
 - Supervision irreversibly converts `qbox -> hbox -> rbox` before the model.
 - The prepared tree has no independent validation split. Formal training uses
@@ -59,11 +60,11 @@ Alternatives rejected for this run:
 ## Acceptance criteria
 
 - The formal config builds through the MMRotate registry.
-- Dataloader initialization sees exactly 20,995 trainval samples without
-  modifying source data.
+- Dataloader initialization sees exactly 12,757 effective samples under the
+  official `filter_empty_gt=True` policy, while the source remains 20,995
+  read-only pairs.
 - All project tests pass before arming the controller.
 - Smoke reports finite losses/gradients on both ranks with no traceback/NCCL
   error and writes `epoch_1.pth`.
 - Formal training starts only after tasks 1 and 2 complete and writes to its
   unique DOTA work directory.
-

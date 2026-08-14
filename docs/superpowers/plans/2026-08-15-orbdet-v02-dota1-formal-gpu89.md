@@ -15,7 +15,7 @@
 - [ ] Create `.worktrees/dota-v1-formal` on branch
   `exp/orbdet-v02-dota1-formal` from local `main`.
 - [ ] Add `tests/test_orbdet_v02_dota1_formal_contract.py` asserting model,
-  HBox pipeline, data count/path, 12E optimizer/scheduler, no validation,
+  HBox pipeline, raw/effective data counts, 12E optimizer/scheduler, no validation,
   bounded smoke, required GPU/NCCL/env/ports, and controller order.
 - [ ] Run the test and observe missing artifact failures.
 
@@ -37,7 +37,7 @@ Expected: FAIL because formal config and launch scripts do not exist.
   inheriting formal but limiting the dataset to eight images, one epoch/two
   steps, zero workers, and a unique smoke directory.
 - [ ] Build the model and initialize the formal train dataset; assert 20,995
-  samples.
+  raw pairs and 12,757 effective nonempty samples.
 
 ### Task 3: Implement guarded launchers and controller
 
@@ -57,4 +57,3 @@ Expected: FAIL because formal config and launch scripts do not exist.
 - [ ] Start tmux session `orbdet_v02_dota1_after_godc_gpu89_20260815`; verify
   it waits without a DOTA process or GPU allocation while task 2 is pending.
 - [ ] Update the formal status file on local `main`; do not push.
-
