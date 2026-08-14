@@ -16,6 +16,7 @@ htmlcov/
 .idea/
 .vscode/
 .DS_Store
+.worktrees/
 
 # Local datasets, checkpoints, and experiment artifacts
 data/
@@ -30,4 +31,3 @@ wandb/
 
 # Machine-specific recovery snapshots
 vendor/environment_backups/
-
