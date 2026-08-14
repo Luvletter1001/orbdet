@@ -7,9 +7,7 @@ from mmrotate.models.losses.group_orbit_determinantal_cluster_loss import (
 
 def _loss_without_guards(**kwargs):
     return GroupOrbitDeterminantalClusterLoss(
-        energy_guard_weight=0.0,
-        variance_guard_weight=0.0,
-        **kwargs)
+        energy_guard_weight=0.0, variance_guard_weight=0.0, **kwargs)
 
 
 def test_planar_group_orbits_have_exact_elements():
@@ -22,16 +20,15 @@ def test_planar_group_orbits_have_exact_elements():
     c4 = build_planar_group_orbit(x, 'c4')
     assert c4.shape == (1, 4, 1, 3, 3)
     for index in range(4):
-        assert torch.equal(c4[:, index],
-                           torch.rot90(x, index, (-2, -1)))
+        assert torch.equal(c4[:, index], torch.rot90(x, index, (-2, -1)))
 
     d1 = build_planar_group_orbit(x, 'd1')
     assert torch.equal(d1[:, 0], x)
     assert torch.equal(d1[:, 1], torch.flip(x, (-1, )))
 
     d2 = build_planar_group_orbit(x, 'd2')
-    expected = (x, torch.rot90(x, 2, (-2, -1)),
-                torch.flip(x, (-1, )), torch.flip(x, (-2, )))
+    expected = (x, torch.rot90(x, 2, (-2, -1)), torch.flip(x, (-1, )),
+                torch.flip(x, (-2, )))
     for index, element in enumerate(expected):
         assert torch.equal(d2[:, index], element)
 
@@ -60,10 +57,8 @@ def test_invariant_orbit_has_zero_rank_and_fixed_residuals():
 
 
 def test_asymmetric_orbit_costs_more_than_symmetric_orbit():
-    symmetric = torch.tensor([[[[1., 2., 2., 1.],
-                                [3., 4., 4., 3.]]]])
-    asymmetric = torch.tensor([[[[1., 2., 3., 4.],
-                                 [2., 5., 7., 11.]]]])
+    symmetric = torch.tensor([[[[1., 2., 2., 1.], [3., 4., 4., 3.]]]])
+    asymmetric = torch.tensor([[[[1., 2., 3., 4.], [2., 5., 7., 11.]]]])
     loss_fn = _loss_without_guards()
 
     symmetric_loss = loss_fn(build_planar_group_orbit(symmetric, 'd1'))
@@ -98,8 +93,7 @@ def test_zero_constant_and_empty_support_trigger_guards():
     assert float(loss_fn.last_energy_guard) > 0.0
     assert float(loss_fn(constant)) > 0.0
     assert float(loss_fn.last_variance_guard) > 0.0
-    assert float(
-        loss_fn(constant, support_mask=torch.zeros(1, 2, 2))) > 0.0
+    assert float(loss_fn(constant, support_mask=torch.zeros(1, 2, 2))) > 0.0
 
 
 def test_mask_weights_reductions_and_avg_factor_follow_contract():
@@ -116,8 +110,7 @@ def test_mask_weights_reductions_and_avg_factor_follow_contract():
     assert values[1] == 0
 
     mean_fn = _loss_without_guards(reduction='mean')
-    averaged = mean_fn(
-        orbit, support_mask=mask, weight=weight, avg_factor=1.0)
+    averaged = mean_fn(orbit, support_mask=mask, weight=weight, avg_factor=1.0)
     assert torch.allclose(averaged, values.sum())
 
 
@@ -168,16 +161,14 @@ def test_loss_rejects_invalid_or_nonfinite_inputs():
     with pytest.raises(ValueError, match='finite'):
         loss_fn(torch.tensor([[[1.0, float('nan')], [1.0, 2.0]]]))
     with pytest.raises(ValueError, match='non-negative'):
-        loss_fn(
-            torch.ones(1, 2, 1, 2, 2),
-            support_mask=-torch.ones(1, 2, 2))
+        loss_fn(torch.ones(1, 2, 1, 2, 2), support_mask=-torch.ones(1, 2, 2))
     with pytest.raises(ValueError, match='positive'):
         loss_fn(torch.ones(1, 2, 4), avg_factor=0.0)
 
 
 def test_loss_builds_from_mmrotate_registry_and_public_export():
-    from mmrotate.models.losses import (
-        GroupOrbitDeterminantalClusterLoss as ExportedLoss)
+    from mmrotate.models.losses import (GroupOrbitDeterminantalClusterLoss as
+                                        ExportedLoss)
     from mmrotate.registry import MODELS
     from mmrotate.utils import register_all_modules
 

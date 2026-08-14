@@ -35,14 +35,12 @@ def build_planar_group_orbit(features: Tensor, group: str) -> Tensor:
     elif group == 'c4':
         if features.shape[-2] != features.shape[-1]:
             raise ValueError('c4 requires square spatial support')
-        elements = tuple(
-            torch.rot90(features, k, (-2, -1)) for k in range(4))
+        elements = tuple(torch.rot90(features, k, (-2, -1)) for k in range(4))
     elif group == 'd1':
         elements = (features, torch.flip(features, (-1, )))
     elif group == 'd2':
         elements = (features, torch.rot90(features, 2, (-2, -1)),
-                    torch.flip(features, (-1, )),
-                    torch.flip(features, (-2, )))
+                    torch.flip(features, (-1, )), torch.flip(features, (-2, )))
     elif group == 'c1':
         raise ValueError('the trivial group c1 is not a valid hypothesis')
     else:
@@ -118,10 +116,9 @@ class GroupOrbitDeterminantalClusterLoss(torch.nn.Module):
         self.last_variance_guard = zero
         self.last_q_gap = zero
 
-    def _record_diagnostics(self, determinantal: Tensor,
-                            spectral_tail: Tensor, fixed_space: Tensor,
-                            energy_guard: Tensor, variance_guard: Tensor,
-                            q_gap: Tensor) -> None:
+    def _record_diagnostics(self, determinantal: Tensor, spectral_tail: Tensor,
+                            fixed_space: Tensor, energy_guard: Tensor,
+                            variance_guard: Tensor, q_gap: Tensor) -> None:
         self.last_determinantal = determinantal.detach().mean()
         self.last_spectral_tail = spectral_tail.detach().mean()
         self.last_fixed_space = fixed_space.detach().mean()
@@ -170,14 +167,14 @@ class GroupOrbitDeterminantalClusterLoss(torch.nn.Module):
         if not isinstance(weight, Tensor):
             weight = reference.new_tensor(weight)
         else:
-            weight = weight.to(device=reference.device,
-                               dtype=reference.dtype)
+            weight = weight.to(device=reference.device, dtype=reference.dtype)
         if weight.ndim == 0:
             weight = weight.expand(batch_size)
         elif weight.numel() == batch_size:
             weight = weight.reshape(batch_size)
         else:
-            raise ValueError('weight must be scalar or have one value per sample')
+            raise ValueError(
+                'weight must be scalar or have one value per sample')
         if not bool(torch.isfinite(weight).all()):
             raise ValueError('weight must contain only finite values')
         if bool((weight < 0).any()):
@@ -247,14 +244,12 @@ class GroupOrbitDeterminantalClusterLoss(torch.nn.Module):
         gram = matrix @ matrix.transpose(-1, -2)
         trace = gram.diagonal(dim1=-2, dim2=-1).sum(-1)
         trace_g2 = gram.square().sum(dim=(-2, -1))
-        determinantal = (
-            (trace.square() - trace_g2).clamp_min(0.0) /
-            (2.0 * trace.square() + self.eps))
+        determinantal = ((trace.square() - trace_g2).clamp_min(0.0) /
+                         (2.0 * trace.square() + self.eps))
 
         eigenvalues = torch.linalg.eigvalsh(gram).clamp_min(0.0)
-        spectral_tail = (
-            1.0 - eigenvalues[:, -1] /
-            (trace + self.eps)).clamp_min(0.0)
+        spectral_tail = (1.0 - eigenvalues[:, -1] /
+                         (trace + self.eps)).clamp_min(0.0)
 
         orbit_mean = matrix.mean(dim=1, keepdim=True)
         fixed_space = (matrix - orbit_mean).square().sum(dim=(1, 2)) / (
