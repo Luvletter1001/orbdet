@@ -1,59 +1,55 @@
 ---
 formal_train_status: running
-formal_train_stage: orbdet_v0_2_anchored_symmetry_seed3407_post_epoch24_gate
-baseline_train_status: h2rbox_recovery_epoch200_complete
-baseline_val_mAP_epoch200: 0.8710
-previous_candidate_status: orbdet_v0_1_algorithm_failed
-candidate_train_status: running
-candidate_test_status: held_out_forbidden_during_selection
-smoke_train_status: passed_2_of_2_steps
+formal_train_stage: orbdet_v0_2_hrsc_seed42_then_seed2026
 user_explicit_authorization_required: satisfied
-authorized_scope: orbdet_v0.2_hrsc_clean_gpu89
+authorized_scope: orbdet_tasks_1_2_3_priority_1_2
 authorized_gpus: 8,9
-authorized_at: 2026-08-14T23:34:54+08:00
-started_at: 2026-08-14T23:36:51+08:00
-target_train_epoch: 103
-target_optimizer_steps: 11227
-seed: 3407
-early_gate_epoch: 24
-early_gate_val_mAP: 0.70
-early_gate_status: passed
-epoch12_val_mAP: 0.7702
-epoch24_val_mAP: 0.8946
-epoch24_val_AP50: 0.8950
-best_val_epoch: 24
-best_val_mAP: 0.8946
-target_val_mAP: 0.88
+authorized_at: 2026-08-15T03:20:00+08:00
+baseline_seed3407_status: complete_epoch103
+baseline_seed3407_best_epoch: 48
+baseline_seed3407_best_val_mAP: 0.9029
+baseline_seed42_status: running
+baseline_seed42_started_at: 2026-08-15T03:26:55+08:00
+baseline_seed2026_status: queued
+godc_code_status: tests_passed_63
+godc_smoke_status: armed_after_multiseed_success
+godc_formal_status: armed_after_smoke_success
 held_out_test_policy: forbidden_until_model_freeze
-config: /data1/zcy/Orbdet/configs/orbdet/orbdet_v0_2_r50_hrsc_clean_gpu89.py
-smoke_config: /data1/zcy/Orbdet/configs/orbdet/orbdet_v0_2_r50_hrsc_clean_gpu89_smoke.py
-work_dir: /data1/zcy/Orbdet/work_dirs/formal/orbdet_v0_2_hrsc_clean_gpu89_seed3407_20260814
-tmux_session: orbdet_v02_hrsc_clean_gpu89_seed3407_20260814
-launcher_pid: 30007
-rank_pids: 30010,30011
-smoke_peak_memory_mib_per_gpu: 5607
-updated_at: 2026-08-14T23:51:03+08:00
+v02_worktree: /data1/zcy/Orbdet/.worktrees/v02-stability
+godc_worktree: /data1/zcy/Orbdet/.worktrees/godc-integration
+v02_tmux_session: orbdet_v02_multiseed_gpu89_20260815
+godc_controller_tmux_session: orbdet_godc_after_v02_gpu89_20260815
+updated_at: 2026-08-15T03:35:07+08:00
 ---
 
 # 正式训练状态
 
-用户已在当前回合明确授权实现 Orbdet-v0.2，并在物理 GPU 8/9 上训练。
-代码、合同测试和双卡冒泡已经通过，正式 103E 训练已启动。
+用户已明确授权任务 1、2、3 的正式训练，并要求本夜优先完成任务 1、2；物理
+GPU 8/9 的所有启动均固定设置 `NCCL_P2P_DISABLE=1` 与
+`NCCL_IB_DISABLE=1`。所有工作仅保存在本地，不推送远端。
 
-## 当前候选
+## 已完成的参考 seed
 
-- 方向锚点：官方 H2RBox-v2 original/rotated/flipped symmetry path。
-- 边界处理：PSC coder + snap loss。
-- 跨视图对应：相同目标使用固定 `bid` 聚合。
-- Orbdet `q`：只记录 rotation/flip/HBox anchored diagnostics，不参与损失
-  加权，也不参与推理打分。
-- 数据：`train.txt` 训练、`val.txt` 选模、`test.txt` 保持封存。
-- 计划：GPU 8/9 双 rank，batch 2/rank，seed 3407，103E。
-- 提前停止门：epoch 24 validation mAP 小于 0.70 时停止候选。
+Orbdet-v0.2 clean-HRSC seed 3407 已在 2026-08-15 00:36:58 完整跑到
+epoch 103。最佳 clean validation 是 epoch 48 的 mAP `0.9029`、AP50
+`0.9030`。held-out test 仍未运行。
 
-epoch 12 clean validation 为 `0.7702`；epoch 24 升至 `0.8946`，AP50
-`0.8950`、recall `0.919`。候选已通过非塌缩门与首 seed 的 0.88 目标，正式
-训练继续到 103E。稳定性结论仍需 seed 42/2026，不以单 seed 代替。
+## 当前任务 1
 
-上一轮 Orbdet-v0.1 最佳 validation mAP 为 `0.0916`，已经按预注册规则
-判定算法失败；其 harmonic quality 不会用于本候选训练。
+- 冻结分支：`exp/v02-hrsc-stability`。
+- 顺序：seed 42 正在运行，正常结束后自动启动 seed 2026。
+- 队列采用独立 config、端口和 work dir；已有 checkpoint 时拒绝覆盖。
+- 成功/失败标记：
+  `work_dirs/formal/orbdet_v0_2_hrsc_multiseed_gpu89_20260815/`。
+
+## 已布防的任务 2
+
+GODC 的 HBox/FPN `C2` 接入已通过项目 `tests/` 全量 63 项测试。独立控制器
+当前只等待任务 1 的 `COMPLETE` 标记，不占用 GPU。任务 1 成功后，它将：
+
+1. 运行 8 图、双 rank、2 optimizer-step smoke；
+2. 检查 smoke 生成 `epoch_1.pth`；
+3. 仅在 smoke 成功后启动 seed 3407 的 103E clean-HRSC 正式训练；
+4. 任一阶段失败即写 `FAILED` 并停止，不会结束其他用户进程。
+
+任务 3（DOTA-v1）保持授权但优先级较低，不会插到任务 1、2 之间。
