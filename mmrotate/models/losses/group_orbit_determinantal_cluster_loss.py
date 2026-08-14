@@ -1,6 +1,9 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 """Group-orbit determinantal clustering primitives for Orbdet."""
 
+import math
+from typing import Optional, Union
+
 import torch
 from torch import Tensor
 
@@ -74,15 +77,17 @@ class GroupOrbitDeterminantalClusterLoss(torch.nn.Module):
             'variance_guard_weight': variance_guard_weight,
         }
         for name, value in component_weights.items():
+            if not math.isfinite(value):
+                raise ValueError(f'{name} must be finite')
             if value < 0.0:
                 raise ValueError(f'{name} must be non-negative')
         if not any(value > 0.0 for value in component_weights.values()):
             raise ValueError('at least one component weight must be positive')
-        if min_energy <= 0.0:
+        if not math.isfinite(min_energy) or min_energy <= 0.0:
             raise ValueError('min_energy must be positive')
-        if min_variance <= 0.0:
+        if not math.isfinite(min_variance) or min_variance <= 0.0:
             raise ValueError('min_variance must be positive')
-        if eps <= 0.0:
+        if not math.isfinite(eps) or eps <= 0.0:
             raise ValueError('eps must be positive')
         if reduction not in ('none', 'mean', 'sum'):
             raise ValueError("reduction must be 'none', 'mean', or 'sum'")
@@ -104,15 +109,111 @@ class GroupOrbitDeterminantalClusterLoss(torch.nn.Module):
         self.last_variance_guard = torch.tensor(0.0)
         self.last_q_gap = torch.tensor(0.0)
 
+    def _reset_diagnostics(self, reference: Tensor) -> None:
+        zero = reference.new_zeros(())
+        self.last_determinantal = zero
+        self.last_spectral_tail = zero
+        self.last_fixed_space = zero
+        self.last_energy_guard = zero
+        self.last_variance_guard = zero
+        self.last_q_gap = zero
+
     def _record_diagnostics(self, determinantal: Tensor,
                             spectral_tail: Tensor, fixed_space: Tensor,
+                            energy_guard: Tensor, variance_guard: Tensor,
                             q_gap: Tensor) -> None:
         self.last_determinantal = determinantal.detach().mean()
         self.last_spectral_tail = spectral_tail.detach().mean()
         self.last_fixed_space = fixed_space.detach().mean()
+        self.last_energy_guard = energy_guard.detach().mean()
+        self.last_variance_guard = variance_guard.detach().mean()
         self.last_q_gap = q_gap.detach().mean()
 
-    def forward(self, orbit: Tensor) -> Tensor:
+    def _apply_support_mask(self, orbit: Tensor,
+                            support_mask: Optional[Tensor]) -> Tensor:
+        if support_mask is None:
+            return orbit
+        if not isinstance(support_mask, Tensor):
+            raise TypeError('support_mask must be a torch.Tensor')
+        if not bool(torch.isfinite(support_mask).all()):
+            raise ValueError('support_mask must contain only finite values')
+        if bool((support_mask < 0).any()):
+            raise ValueError('support_mask must be non-negative')
+
+        mask = support_mask.to(device=orbit.device, dtype=orbit.dtype)
+        if mask.ndim == orbit.ndim:
+            broadcast_mask = mask
+        elif mask.ndim == 0:
+            broadcast_mask = mask
+            while broadcast_mask.ndim < orbit.ndim:
+                broadcast_mask = broadcast_mask.unsqueeze(0)
+        else:
+            if mask.ndim > orbit.ndim - 1:
+                raise ValueError('support_mask is not broadcastable to orbit')
+            if mask.shape[0] in (1, orbit.shape[0]):
+                broadcast_mask = mask.unsqueeze(1)
+            else:
+                broadcast_mask = mask.unsqueeze(0).unsqueeze(0)
+            while broadcast_mask.ndim < orbit.ndim:
+                broadcast_mask = broadcast_mask.unsqueeze(2)
+
+        try:
+            return orbit * broadcast_mask
+        except RuntimeError as error:
+            raise ValueError(
+                'support_mask is not broadcastable to orbit') from error
+
+    def _prepare_weight(self, weight: Optional[Tensor], reference: Tensor,
+                        batch_size: int) -> Optional[Tensor]:
+        if weight is None:
+            return None
+        if not isinstance(weight, Tensor):
+            weight = reference.new_tensor(weight)
+        else:
+            weight = weight.to(device=reference.device,
+                               dtype=reference.dtype)
+        if weight.ndim == 0:
+            weight = weight.expand(batch_size)
+        elif weight.numel() == batch_size:
+            weight = weight.reshape(batch_size)
+        else:
+            raise ValueError('weight must be scalar or have one value per sample')
+        if not bool(torch.isfinite(weight).all()):
+            raise ValueError('weight must contain only finite values')
+        if bool((weight < 0).any()):
+            raise ValueError('weight must be non-negative')
+        return weight
+
+    def _reduce(self, loss: Tensor, weight: Optional[Tensor], reduction: str,
+                avg_factor: Optional[Union[float, Tensor]]) -> Tensor:
+        if weight is not None:
+            loss = loss * weight
+        if reduction == 'none':
+            if avg_factor is not None:
+                raise ValueError(
+                    'avg_factor can only be used with mean reduction')
+            return loss
+        if reduction == 'sum':
+            if avg_factor is not None:
+                raise ValueError(
+                    'avg_factor can only be used with mean reduction')
+            return loss.sum()
+        if avg_factor is None:
+            return loss.mean()
+
+        factor = loss.new_tensor(avg_factor)
+        if factor.numel() != 1 or not bool(torch.isfinite(factor).all()):
+            raise ValueError('avg_factor must be one finite scalar')
+        if bool(factor <= 0):
+            raise ValueError('avg_factor must be positive')
+        return loss.sum() / factor
+
+    def forward(self,
+                orbit: Tensor,
+                support_mask: Optional[Tensor] = None,
+                weight: Optional[Tensor] = None,
+                avg_factor: Optional[Union[float, Tensor]] = None,
+                reduction_override: Optional[str] = None) -> Tensor:
         """Compute the loss for an orbit shaped ``[N, K, ...]``."""
         if not isinstance(orbit, Tensor):
             raise TypeError('orbit must be a torch.Tensor')
@@ -120,15 +221,27 @@ class GroupOrbitDeterminantalClusterLoss(torch.nn.Module):
             raise ValueError('orbit must have shape [N, K, ...]')
         if orbit.shape[1] < 2:
             raise ValueError('orbit group order K must be at least 2')
-        if orbit.numel() == 0 and orbit.shape[0] != 0:
+        if any(size == 0 for size in orbit.shape[2:]):
             raise ValueError('orbit members must have non-empty features')
+        if not orbit.is_floating_point():
+            raise TypeError('orbit must have a floating-point dtype')
         if not bool(torch.isfinite(orbit).all()):
             raise ValueError('orbit must contain only finite values')
+        reduction = reduction_override or self.reduction
+        if reduction not in ('none', 'mean', 'sum'):
+            raise ValueError("reduction must be 'none', 'mean', or 'sum'")
 
         work_orbit = orbit
         if orbit.dtype in (torch.float16, torch.bfloat16):
             work_orbit = orbit.float()
         batch_size, group_order = work_orbit.shape[:2]
+        if batch_size == 0:
+            self._reset_diagnostics(work_orbit)
+            if reduction == 'none':
+                return work_orbit.new_empty((0, ))
+            return work_orbit.sum() * 0.0
+
+        work_orbit = self._apply_support_mask(work_orbit, support_mask)
         matrix = work_orbit.reshape(batch_size, group_order, -1)
 
         gram = matrix @ matrix.transpose(-1, -2)
@@ -150,14 +263,25 @@ class GroupOrbitDeterminantalClusterLoss(torch.nn.Module):
         sigma_1 = eigenvalues[:, -1].sqrt()
         sigma_2 = eigenvalues[:, -2].sqrt()
         q_gap = (sigma_1 - sigma_2) / (sigma_1 + self.eps)
-        self._record_diagnostics(determinantal, spectral_tail, fixed_space,
-                                 q_gap)
 
-        loss = (self.determinantal_weight * determinantal +
-                self.spectral_tail_weight * spectral_tail +
-                self.fixed_space_weight * fixed_space)
-        if self.reduction == 'none':
-            return loss
-        if self.reduction == 'sum':
-            return loss.sum()
-        return loss.mean()
+        energy = matrix.square().mean(dim=(1, 2))
+        variance = matrix.var(dim=-1, unbiased=False).mean(dim=1)
+        energy_guard = (self.min_energy - energy).clamp_min(0.0)
+        variance_guard = (self.min_variance - variance).clamp_min(0.0)
+        self._record_diagnostics(determinantal, spectral_tail, fixed_space,
+                                 energy_guard, variance_guard, q_gap)
+
+        loss = matrix.new_zeros((batch_size, ))
+        components = (
+            (self.determinantal_weight, determinantal),
+            (self.spectral_tail_weight, spectral_tail),
+            (self.fixed_space_weight, fixed_space),
+            (self.energy_guard_weight, energy_guard),
+            (self.variance_guard_weight, variance_guard),
+        )
+        for component_weight, component in components:
+            if component_weight > 0.0:
+                loss = loss + component_weight * component
+
+        sample_weight = self._prepare_weight(weight, matrix, batch_size)
+        return self._reduce(loss, sample_weight, reduction, avg_factor)

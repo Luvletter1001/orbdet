@@ -2,6 +2,8 @@
 from .convex_giou_loss import BCConvexGIoULoss, ConvexGIoULoss
 from .gaussian_dist_loss import GDLoss
 from .gaussian_dist_loss_v1 import GDLoss_v1
+from .group_orbit_determinantal_cluster_loss import (
+    GroupOrbitDeterminantalClusterLoss, build_planar_group_orbit)
 from .h2rbox_consistency_loss import H2RBoxConsistencyLoss
 from .h2rbox_v2_consistency_loss import H2RBoxV2ConsistencyLoss
 from .kf_iou_loss import KFLoss
@@ -15,5 +17,6 @@ __all__ = [
     'GDLoss', 'GDLoss_v1', 'KFLoss', 'ConvexGIoULoss', 'BCConvexGIoULoss',
     'SmoothFocalLoss', 'RotatedIoULoss', 'SpatialBorderLoss',
     'H2RBoxConsistencyLoss', 'H2RBoxV2ConsistencyLoss',
-    'OrbdetAnchoredSymmetryLoss', 'OrbdetHarmonicConsistencyLoss'
+    'OrbdetAnchoredSymmetryLoss', 'OrbdetHarmonicConsistencyLoss',
+    'GroupOrbitDeterminantalClusterLoss', 'build_planar_group_orbit'
 ]
