@@ -45,6 +45,11 @@ class H2RBoxV2Detector(SingleStageDetector):
         self.padding = padding
         self.view_range = view_range
 
+    def _add_auxiliary_losses(self, losses: dict, features: Tuple[Tensor],
+                              batch_gt_instances: InstanceList) -> dict:
+        """Extension point for losses using the existing training features."""
+        return losses
+
     def rotate_crop(
             self,
             batch_inputs: Tensor,
@@ -181,5 +186,4 @@ class H2RBoxV2Detector(SingleStageDetector):
 
         feat = self.extract_feat(batch_inputs_all)
         losses = self.bbox_head.loss(feat, batch_data_samples_all)
-
-        return losses
+        return self._add_auxiliary_losses(losses, feat, batch_gt_instances)
