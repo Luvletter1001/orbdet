@@ -2,7 +2,8 @@
 formal_train_status: running
 formal_train_stage: orbdet_v0_2_hrsc_seed42_then_seed2026
 user_explicit_authorization_required: satisfied
-authorized_scope: orbdet_tasks_1_2_3_priority_1_2
+authorized_scope: orbdet_v0.2_hrsc_clean_gpu89
+authorized_additional_scope: orbdet_tasks_1_2_3_priority_1_2
 authorized_gpus: 8,9
 authorized_at: 2026-08-15T03:20:00+08:00
 baseline_seed3407_status: complete_epoch103
