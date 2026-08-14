@@ -1,0 +1,33 @@
+# Python bytecode and native build products
+__pycache__/
+*.py[cod]
+*.so
+build/
+*.egg-info/
+
+# Test, lint, and coverage caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+
+# Local datasets, checkpoints, and experiment artifacts
+data/
+weights/
+work_dirs/
+.dist_test/
+*.pth
+*.pt
+*.ckpt
+*.log
+wandb/
+
+# Machine-specific recovery snapshots
+vendor/environment_backups/
+
