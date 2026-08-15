@@ -322,6 +322,14 @@ def test_gpu4567_six_hour_stage_contract():
     assert '--master_port=29661' in audit
     assert '--master_port=29662' in audit
     assert str(GPU4567_AUDIT_ROOT) in audit
+    assert (
+        'test_evaluator.outfile_prefix='
+        f'{GPU4567_AUDIT_ROOT}/ss_submission/'
+        'h2rbox_v2_official_ss_task1') in audit
+    assert (
+        'test_evaluator.outfile_prefix='
+        f'{GPU4567_AUDIT_ROOT}/ms_submission/'
+        'h2rbox_v2_official_msrr_task1') in audit
 
     stage_launcher = GPU4567_STAGE1_LAUNCHER.read_text()
     assert GPU4567_STAGE1_CONFIG.name in stage_launcher
@@ -332,6 +340,8 @@ def test_gpu4567_six_hour_stage_contract():
     window = GPU4567_WINDOW_LAUNCHER.read_text()
     assert '345m' in window
     assert '5h45m' not in window
+    assert 'WINDOW_TIMEOUT:-345m' in window
+    assert '"${window_timeout}"' in window
     assert 'timeout' in window
     assert window.index(GPU4567_AUDIT_LAUNCHER.name) < window.index(
         GPU4567_SMOKE_LAUNCHER.name) < window.index(

@@ -6,6 +6,7 @@ window_root=/data1/zcy/Orbdet/work_dirs/controllers/orbdet_v0_2_dota1_ms_rr_gpu4
 audit_launcher="${repo_root}/scripts/eval/run_h2rbox_v2_dota1_official_checkpoint_audit_gpu4567.sh"
 smoke_launcher="${repo_root}/scripts/smoke/run_orbdet_v0_2_r50_dota1_ms_rr_gpu4567_smoke.sh"
 stage_launcher="${repo_root}/scripts/formal/run_orbdet_v0_2_r50_dota1_ms_rr_gpu4567_stage1_3e.sh"
+window_timeout="${WINDOW_TIMEOUT:-345m}"
 
 rtk mkdir -p "${window_root}"
 if [[ -e "${window_root}/RUNNING" || -e "${window_root}/COMPLETE" ]]; then
@@ -15,7 +16,7 @@ fi
 rtk touch "${window_root}/RUNNING"
 
 set +e
-rtk timeout --signal=INT --kill-after=5m 345m \
+rtk timeout --signal=INT --kill-after=5m "${window_timeout}" \
   rtk bash -c "cd '${repo_root}' && rtk bash '${audit_launcher}' && rtk bash '${smoke_launcher}' && rtk bash '${stage_launcher}'"
 exit_code=$?
 set -e

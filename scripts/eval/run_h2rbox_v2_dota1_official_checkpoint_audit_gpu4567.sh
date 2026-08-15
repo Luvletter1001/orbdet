@@ -90,7 +90,9 @@ rtk env PYTHONNOUSERSITE=1 PYTHONPATH="${repo_root}" \
   CUDA_VISIBLE_DEVICES=4,5,6,7 NCCL_P2P_DISABLE=1 NCCL_IB_DISABLE=1 \
   "${python_bin}" -m torch.distributed.launch --nproc_per_node=4 \
   --master_port=29661 "${repo_root}/tools/test.py" "${ss_test_config}" \
-  "${ss_checkpoint}" --launcher=pytorch --work-dir="${ss_submission_work_dir}"
+  "${ss_checkpoint}" --launcher=pytorch --work-dir="${ss_submission_work_dir}" \
+  --cfg-options \
+  test_evaluator.outfile_prefix=/data1/zcy/Orbdet/work_dirs/audit/h2rbox_v2_dota1_official_gpu4567_20260816/ss_submission/h2rbox_v2_official_ss_task1
 validate_zip "${ss_zip}"
 rtk touch "${audit_root}/SS_SUBMISSION_COMPLETE"
 
@@ -99,7 +101,9 @@ rtk env PYTHONNOUSERSITE=1 PYTHONPATH="${repo_root}" \
   CUDA_VISIBLE_DEVICES=4,5,6,7 NCCL_P2P_DISABLE=1 NCCL_IB_DISABLE=1 \
   "${python_bin}" -m torch.distributed.launch --nproc_per_node=4 \
   --master_port=29662 "${repo_root}/tools/test.py" "${ms_test_config}" \
-  "${msrr_checkpoint}" --launcher=pytorch --work-dir="${ms_submission_work_dir}"
+  "${msrr_checkpoint}" --launcher=pytorch --work-dir="${ms_submission_work_dir}" \
+  --cfg-options \
+  test_evaluator.outfile_prefix=/data1/zcy/Orbdet/work_dirs/audit/h2rbox_v2_dota1_official_gpu4567_20260816/ms_submission/h2rbox_v2_official_msrr_task1
 validate_zip "${ms_zip}"
 rtk touch "${audit_root}/MS_SUBMISSION_COMPLETE"
 rtk touch "${audit_root}/COMPLETE"
