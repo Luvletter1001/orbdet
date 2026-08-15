@@ -23,9 +23,9 @@
 | seed | 3407 |
 | hard_timeout | `335m` |
 | expected_finish | about 09:05 CST |
-| latest_observed | epoch 2, step 17,162 at 06:08 |
-| latest_loss | `1.4019` |
-| latest_grad_norm | `4.8132` |
+| latest_observed | epoch 3, global step 34,224 at 07:36 |
+| latest_loss | `1.2705` |
+| latest_grad_norm | `3.9720` |
 
 ## 前置门禁证据
 
@@ -81,6 +81,19 @@ epoch 1 共记录 854 个 logger points，所有 loss/grad/time 均有限。首�
 `11.0235 -> 5.2044`，mean symmetry loss `0.2596 -> 0.0712`。末窗口 mean
 `q_joint=0.7775`、`q_high_frac=0.8048`、`hbox_fidelity=0.7780`；这些是训练
 诊断量，不作为泛化指标。训练随后自动进入 epoch 2。
+
+## Epoch 2 里程碑
+
+`epoch_2.pth` 于 07:36:24 完整生成，大小 393,763,241 bytes。真实反序列化
+验证为 epoch 2、iter 34,164、371 state tensors，嵌入配置含
+`OrbdetV02Detector` 与 `trainval_ms_full`，SHA256 为
+`e3a07e758da448c03107070d61407887b5deed8ec8f9e4cdc135351deb13429e`。
+
+epoch 2 同样记录 854 个 logger points，所有 loss/grad/time 均有限。首个与最后
+2,000-step 窗口对比：median loss `1.2704 -> 1.2020`，median grad norm
+`4.8829 -> 4.0881`，mean symmetry loss `0.0628 -> 0.0480`。末窗口 mean
+`q_joint=0.8280`、`q_high_frac=0.8356`、`hbox_fidelity=0.7693`。训练随后
+自动进入最终 epoch 3。
 
 ## 解释边界
 
