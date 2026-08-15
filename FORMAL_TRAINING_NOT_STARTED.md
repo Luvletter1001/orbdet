@@ -28,8 +28,9 @@ held_out_test_policy: not_run
 dota1_msrr_gpu4567_audit_status: complete
 dota1_msrr_gpu4567_smoke_status: complete_2_steps
 dota1_msrr_gpu4567_stage1_status: running_epoch1_step2600
-dota1_msrr_gpu4567_posteval_status: contract_passed_not_armed
+dota1_msrr_gpu4567_posteval_status: armed_waiting_for_epoch3
 dota1_msrr_gpu4567_posteval_deadline: 2026-08-16T09:50:00+08:00
+dota1_msrr_gpu4567_posteval_tmux: orbdet_msrr4567_stage3_posteval_20260816
 dota1_msrr_gpu4567_authorized_gpus: 4,5,6,7
 dota1_msrr_gpu4567_authorized_at: 2026-08-16T03:59:00+08:00
 dota1_msrr_gpu4567_started_at: 2026-08-16T04:39:47+08:00
@@ -38,7 +39,7 @@ dota1_msrr_gpu4567_tmux: orbdet_msrr4567_6h_20260816
 v02_worktree: /data1/zcy/Orbdet/.worktrees/v02-stability
 godc_worktree: /data1/zcy/Orbdet/.worktrees/godc-integration
 dota_v1_worktree: /data1/zcy/Orbdet/.worktrees/dota-v1-formal
-updated_at: 2026-08-16T04:53:24+08:00
+updated_at: 2026-08-16T04:55:21+08:00
 ---
 
 # 正式训练状态
@@ -97,6 +98,7 @@ updated_at: 2026-08-16T04:53:24+08:00
   4 小时 42 分。控制器硬截止约为 09:55。
 - 当前只计划在 epoch 3 完整结束且剩余至少 1,800 秒时运行 trainval/SS/MS
   阶段评测；评测绝对截止为 09:50，不启动 epoch 4。
+- 有界 watcher 已于 04:55:21 启动，目前只轮询 stage `COMPLETE`，不占用 GPU。
 - `tmux_session=orbdet_msrr4567_6h_20260816`；完整 12E 状态仍为
   `not_complete`，后续 resume 需要用户再次明确授权。
 
