@@ -27,7 +27,9 @@ dota_v1_formal_status: complete_epoch12
 held_out_test_policy: not_run
 dota1_msrr_gpu4567_audit_status: complete
 dota1_msrr_gpu4567_smoke_status: complete_2_steps
-dota1_msrr_gpu4567_stage1_status: running_epoch1_step2600
+dota1_msrr_gpu4567_stage1_status: running_epoch2_epoch1_verified
+dota1_msrr_gpu4567_epoch1_checkpoint_bytes: 389144617
+dota1_msrr_gpu4567_epoch1_checkpoint_sha256: 025ef114f7aaf0d9c65ef97547401bd5424c28b9cd7a6cba9344de9ee2115f94
 dota1_msrr_gpu4567_posteval_status: armed_waiting_for_epoch3
 dota1_msrr_gpu4567_posteval_deadline: 2026-08-16T09:50:00+08:00
 dota1_msrr_gpu4567_posteval_tmux: orbdet_msrr4567_stage3_posteval_20260816
@@ -40,7 +42,7 @@ dota1_msrr_gpu4567_tmux: orbdet_msrr4567_6h_20260816
 v02_worktree: /data1/zcy/Orbdet/.worktrees/v02-stability
 godc_worktree: /data1/zcy/Orbdet/.worktrees/godc-integration
 dota_v1_worktree: /data1/zcy/Orbdet/.worktrees/dota-v1-formal
-updated_at: 2026-08-16T05:00:23+08:00
+updated_at: 2026-08-16T06:09:01+08:00
 ---
 
 # 正式训练状态
@@ -95,8 +97,9 @@ updated_at: 2026-08-16T05:00:23+08:00
 - 官方 SS/MS+RR checkpoint 审计已完成；SS trainval `mAP=0.8131`，两份
   submission ZIP 均通过 15 文件与压缩完整性检查。
 - 四 rank 两步 smoke 已完成并生成 `epoch_1.pth`。
-- stage 1 于 2026-08-16 04:39:47 启动，当前位于 epoch 1；初始 ETA 约
-  4 小时 42 分。控制器硬截止约为 09:55。
+- stage 1 于 2026-08-16 04:39:47 启动；epoch 1 于 06:08:17 完整落盘并
+  通过 epoch=1、iter=17,082、371 tensors 与 SHA256 验证，当前已进入
+  epoch 2。控制器硬截止约为 09:55。
 - 当前只计划在 epoch 3 完整结束且剩余至少 1,800 秒时运行 trainval/SS/MS
   阶段评测；评测绝对截止为 09:50，不启动 epoch 4。
 - 有界 watcher 已于 04:55:21 启动，目前只轮询 stage `COMPLETE`，不占用 GPU。

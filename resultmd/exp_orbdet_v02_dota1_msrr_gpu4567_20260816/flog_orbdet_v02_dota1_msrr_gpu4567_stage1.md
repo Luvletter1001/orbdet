@@ -22,10 +22,10 @@
 | steps_per_epoch | 17,082 |
 | seed | 3407 |
 | hard_timeout | `335m` |
-| expected_finish | about 09:10 CST |
-| latest_observed | epoch 1, step 2,600 at 04:53 |
-| latest_loss | `1.6625` |
-| latest_grad_norm | `9.9207` |
+| expected_finish | about 09:05 CST |
+| latest_observed | epoch 2, step 17,162 at 06:08 |
+| latest_loss | `1.4019` |
+| latest_grad_norm | `4.8132` |
 
 ## 前置门禁证据
 
@@ -68,6 +68,19 @@ watcher 已于 04:55:21 在
 先以缺失实现得到预期 RED，再转为 `8 passed`；并用真实 384,530,537-byte smoke
 checkpoint 验证通过（epoch 1、iter 2、371 tensors，SHA256
 `874ec8f5bcd8d79b38297394f44a3934c9d1c79b788dd547777986c2857eb486`）。
+
+## Epoch 1 里程碑
+
+`epoch_1.pth` 于 06:08:17 完整生成，大小 389,144,617 bytes。真实反序列化
+验证为 epoch 1、iter 17,082、371 state tensors，嵌入配置含
+`OrbdetV02Detector` 与 `trainval_ms_full`，SHA256 为
+`025ef114f7aaf0d9c65ef97547401bd5424c28b9cd7a6cba9344de9ee2115f94`。
+
+epoch 1 共记录 854 个 logger points，所有 loss/grad/time 均有限。首个与最后
+2,000-step 窗口对比：median loss `2.0877 -> 1.2741`，median grad norm
+`11.0235 -> 5.2044`，mean symmetry loss `0.2596 -> 0.0712`。末窗口 mean
+`q_joint=0.7775`、`q_high_frac=0.8048`、`hbox_fidelity=0.7780`；这些是训练
+诊断量，不作为泛化指标。训练随后自动进入 epoch 2。
 
 ## 解释边界
 
