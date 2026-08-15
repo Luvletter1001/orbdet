@@ -22,10 +22,10 @@
 | steps_per_epoch | 17,082 |
 | seed | 3407 |
 | hard_timeout | `335m` |
-| expected_finish | about 09:23 CST |
-| latest_observed | epoch 1, step 160 |
-| latest_loss | `2.4409` |
-| latest_grad_norm | `28.9547` |
+| expected_finish | about 09:10 CST |
+| latest_observed | epoch 1, step 2,600 at 04:53 |
+| latest_loss | `1.6625` |
+| latest_grad_norm | `9.9207` |
 
 ## 前置门禁证据
 
@@ -45,6 +45,18 @@
   `work_dirs/formal/orbdet_v0_2_r50_dota1_ms_rr_gpu4567_seed3407_stage1_3e_20260816/`
 - smoke checkpoint：
   `work_dirs/smoke/orbdet_v0_2_r50_dota1_ms_rr_1x_gpu4567_20260816/epoch_1.pth`
+
+## 六小时窗口的阶段评测安排
+
+3E 完成后不进入 epoch 4。若距离 09:50 仍有至少 1,800 秒，则四卡顺序执行：
+
+1. raw trainval 20,995 patches 的诊断性 mAP（不是 held-out 指标）；
+2. SS test 10,833 patches，生成 15 类 Task1 ZIP；
+3. MS test 71,888 patches，生成 15 类 Task1 ZIP。
+
+评测配置继承本次 MS+RR stage 模型，而不是旧 SS 训练模型；所有数据规模已由
+`6 passed` 的新契约测试实际构建验证。watcher 的绝对截止为 09:50，达到截止会
+向评测发送 INT，且不会终止其他用户进程。
 
 ## 解释边界
 

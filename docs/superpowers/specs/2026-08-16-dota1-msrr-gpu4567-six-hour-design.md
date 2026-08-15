@@ -21,8 +21,12 @@ Orbdet-v0.2 R50 MS+RR 阶段 checkpoint。
 1. 四 rank 官方 SS trainval、SS test submission、MS+RR test submission 审计。
 2. 8 个样本、四 rank、恰好两个 optimizer step 的 smoke。
 3. 四 rank R50 MS+RR stage 1，训练到 epoch 3。
-4. 外层控制器最长运行 `5h45m`，超时后结束当前阶段并保留最近一个完整 epoch
-   checkpoint，为释放 GPU 留出 15 分钟缓冲。
+4. 当前控制器以 `335m` 启动，最晚约 09:55 中断并保留最近一个完整 epoch
+   checkpoint；这比六小时上限额外保留约 25 分钟安全余量。
+5. 若 epoch 3 正常完成且距离 09:50 至少还有 1,800 秒，则依次运行 raw
+   trainval 诊断评测、single-scale test submission 与 multi-scale test
+   submission。评测链有独立的 09:50 绝对截止，不够时间就跳过，绝不启动
+   epoch 4，也不把 trainval 自评解释成 held-out 泛化结果。
 
 所有分布式命令固定 `CUDA_VISIBLE_DEVICES=4,5,6,7`、
 `NCCL_P2P_DISABLE=1`、`NCCL_IB_DISABLE=1`，且启动前拒绝已有 GPU compute
@@ -34,4 +38,7 @@ PID、重复 Orbdet 作业或覆盖既有 checkpoint。
 - smoke 产生 `epoch_1.pth`，日志无 traceback、NCCL error 或非有限 loss/grad。
 - stage 1 正常完成时产生 `epoch_1.pth`、`epoch_2.pth`、`epoch_3.pth`；若受硬截止
   中断，则只报告最近完整 epoch，绝不报告 3E/12E 完成。
+- 阶段评测仅在 3E `COMPLETE` 后启动，使用同一模型合同；数据全集大小固定为
+  trainval 20,995、SS test 10,833、MS test 71,888。两份 ZIP 都必须含根目录
+  15 个 `Task1_*.txt` 文件并通过 CRC 检查。
 - 不改写 DOTA 源数据，不终止或共享其他用户 GPU 进程，不推送远端。

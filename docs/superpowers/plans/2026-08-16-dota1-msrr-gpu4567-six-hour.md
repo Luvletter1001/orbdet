@@ -50,3 +50,20 @@
   markers, metrics, checkpoint paths and timeout state.
 - [ ] Run `git diff --check`, the focused test, and inspect runtime logs for fatal errors.
 - [ ] Commit code and records locally without pushing.
+
+### Task 5: Add a bounded epoch-3 diagnostic chain
+
+**Files:**
+- Create: `configs/orbdet/orbdet_v0_2_r50_dota1_ms_rr_gpu4567_stage1_epoch3_trainval_eval.py`
+- Create: `configs/orbdet/orbdet_v0_2_r50_dota1_ms_rr_gpu4567_stage1_epoch3_ss_test_submission.py`
+- Create: `configs/orbdet/orbdet_v0_2_r50_dota1_ms_rr_gpu4567_stage1_epoch3_ms_test_submission.py`
+- Create: `scripts/eval/run_orbdet_v0_2_dota1_ms_rr_gpu4567_stage1_epoch3_posteval.sh`
+- Create: `scripts/eval/run_orbdet_v0_2_dota1_ms_rr_gpu4567_stage1_epoch3_posteval_when_ready.sh`
+- Create: `tests/test_orbdet_v02_dota1_msrr_gpu4567_stage1_posteval_contract.py`
+
+- [x] Observe the focused contract fail while the configs and launchers are absent.
+- [x] Preserve the stage-1 model contract and build the exact 20,995 / 10,833 /
+  71,888-patch datasets.
+- [x] Add sequential fail-fast trainval, SS, and MS evaluation with ZIP CRC checks.
+- [x] Add an absolute 09:50 deadline and a 1,800-second admission gate.
+- [ ] Arm the bounded watcher and record its terminal state without starting epoch 4.
