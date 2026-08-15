@@ -122,4 +122,5 @@ def test_eval_launcher_is_sequential_fail_fast_and_gpu89_safe():
     assert text.index(TRAINVAL_CONFIG.name) < text.index(
         SUBMISSION_CONFIG.name)
     assert 'tools/train.py' not in text
+    assert 'rtk test -' not in text
     assert 'rm -' not in text

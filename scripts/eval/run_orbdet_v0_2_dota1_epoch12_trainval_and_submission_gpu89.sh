@@ -88,7 +88,10 @@ rtk env \
   --launcher=pytorch \
   --work-dir="${submission_work_dir}"
 
-rtk test -s "${submission_zip}"
+if [[ ! -s "${submission_zip}" ]]; then
+  rtk echo "Submission ZIP is missing or empty: ${submission_zip}" >&2
+  exit 6
+fi
 rtk env PYTHONNOUSERSITE=1 \
   /data/zcy/anaconda3/envs/orbdet/bin/python -c \
   'import sys, zipfile; expected={"Task1_"+name+".txt" for name in ("plane", "baseball-diamond", "bridge", "ground-track-field", "small-vehicle", "large-vehicle", "ship", "tennis-court", "basketball-court", "storage-tank", "soccer-ball-field", "roundabout", "harbor", "swimming-pool", "helicopter")}; actual=set(zipfile.ZipFile(sys.argv[1]).namelist()); assert actual == expected, (actual, expected)' \
