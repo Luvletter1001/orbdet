@@ -17,7 +17,7 @@
 
 - [ ] Add exact paths and assertions for four-card configs and launchers.
 - [ ] Require global batch 4, LR `1e-4`, WD `0.005`, stage1 3E, smoke 8 samples,
-  checkpoint interval 1, four NCCL ranks and `5h45m` deadline.
+  checkpoint interval 1, four NCCL ranks and `345m` (`5h45m`) deadline.
 - [ ] Run the focused test and observe failure because GPU4567 files are absent.
 
 ### Task 2: Implement four-card configs and launchers

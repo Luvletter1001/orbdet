@@ -1,4 +1,5 @@
 import hashlib
+import subprocess
 from pathlib import Path
 
 import torch
@@ -329,10 +330,14 @@ def test_gpu4567_six_hour_stage_contract():
     assert '--resume' not in stage_launcher
 
     window = GPU4567_WINDOW_LAUNCHER.read_text()
-    assert '5h45m' in window
+    assert '345m' in window
+    assert '5h45m' not in window
     assert 'timeout' in window
     assert window.index(GPU4567_AUDIT_LAUNCHER.name) < window.index(
         GPU4567_SMOKE_LAUNCHER.name) < window.index(
             GPU4567_STAGE1_LAUNCHER.name)
     assert 'CUDA_VISIBLE_DEVICES=8,9' not in window
     assert 'rm -' not in window
+    timeout_probe = subprocess.run(
+        ['timeout', '345m', 'true'], check=False, capture_output=True)
+    assert timeout_probe.returncode == 0, timeout_probe.stderr

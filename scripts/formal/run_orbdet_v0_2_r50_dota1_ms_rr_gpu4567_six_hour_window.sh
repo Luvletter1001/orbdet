@@ -15,7 +15,7 @@ fi
 rtk touch "${window_root}/RUNNING"
 
 set +e
-rtk timeout --signal=INT --kill-after=5m 5h45m \
+rtk timeout --signal=INT --kill-after=5m 345m \
   rtk bash -c "cd '${repo_root}' && rtk bash '${audit_launcher}' && rtk bash '${smoke_launcher}' && rtk bash '${stage_launcher}'"
 exit_code=$?
 set -e
