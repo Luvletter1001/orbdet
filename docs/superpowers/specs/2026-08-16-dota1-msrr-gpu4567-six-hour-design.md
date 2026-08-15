@@ -41,4 +41,7 @@ PID、重复 Orbdet 作业或覆盖既有 checkpoint。
 - 阶段评测仅在 3E `COMPLETE` 后启动，使用同一模型合同；数据全集大小固定为
   trainval 20,995、SS test 10,833、MS test 71,888。两份 ZIP 都必须含根目录
   15 个 `Task1_*.txt` 文件并通过 CRC 检查。
+- 推理前必须完整反序列化 `epoch_3.pth`，并验证 metadata 为 epoch 3、iter
+  51,246、371 个 state tensors，且嵌入配置含 `OrbdetV02Detector` 与
+  `trainval_ms_full`；验证证据包含 checkpoint SHA256。
 - 不改写 DOTA 源数据，不终止或共享其他用户 GPU 进程，不推送远端。

@@ -63,6 +63,12 @@ watcher 已于 04:55:21 在
 `RUNNING` marker，没有提前创建推理进程或占用额外显存。联合回归为
 `13 passed, 4 warnings`。
 
+05:00 新增 checkpoint 强门禁：推理前必须反序列化并确认 epoch 3、iter
+51,246、371 tensors、Orbdet/MS-trainval 配置 token，随后记录 SHA256。门禁 CLI
+先以缺失实现得到预期 RED，再转为 `8 passed`；并用真实 384,530,537-byte smoke
+checkpoint 验证通过（epoch 1、iter 2、371 tensors，SHA256
+`874ec8f5bcd8d79b38297394f44a3934c9d1c79b788dd547777986c2857eb486`）。
+
 ## 解释边界
 
 本轮 3E 只是可续训阶段，不是完整 12E 结果，不能用于最终在线 AP 结论。若控制器

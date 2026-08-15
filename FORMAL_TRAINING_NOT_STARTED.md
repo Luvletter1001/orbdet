@@ -31,6 +31,7 @@ dota1_msrr_gpu4567_stage1_status: running_epoch1_step2600
 dota1_msrr_gpu4567_posteval_status: armed_waiting_for_epoch3
 dota1_msrr_gpu4567_posteval_deadline: 2026-08-16T09:50:00+08:00
 dota1_msrr_gpu4567_posteval_tmux: orbdet_msrr4567_stage3_posteval_20260816
+dota1_msrr_gpu4567_checkpoint_gate: epoch3_iter51246_state371_sha256
 dota1_msrr_gpu4567_authorized_gpus: 4,5,6,7
 dota1_msrr_gpu4567_authorized_at: 2026-08-16T03:59:00+08:00
 dota1_msrr_gpu4567_started_at: 2026-08-16T04:39:47+08:00
@@ -39,7 +40,7 @@ dota1_msrr_gpu4567_tmux: orbdet_msrr4567_6h_20260816
 v02_worktree: /data1/zcy/Orbdet/.worktrees/v02-stability
 godc_worktree: /data1/zcy/Orbdet/.worktrees/godc-integration
 dota_v1_worktree: /data1/zcy/Orbdet/.worktrees/dota-v1-formal
-updated_at: 2026-08-16T04:55:21+08:00
+updated_at: 2026-08-16T05:00:23+08:00
 ---
 
 # 正式训练状态

@@ -1,5 +1,9 @@
+import json
+import subprocess
+import sys
 from pathlib import Path
 
+import torch
 from mmengine.config import Config
 
 from mmrotate.registry import DATASETS
@@ -27,6 +31,8 @@ LAUNCHER = (
 WATCHER = (
     SCRIPT_DIR /
     'run_orbdet_v0_2_dota1_ms_rr_gpu4567_stage1_epoch3_posteval_when_ready.sh')
+CHECKPOINT_VALIDATOR = (
+    ROOT / 'tools/analysis_tools/validate_checkpoint_contract.py')
 
 STAGE_ROOT = (
     '/data1/zcy/Orbdet/work_dirs/formal/'
@@ -40,6 +46,59 @@ SS_WORK_DIR = f'{EVAL_ROOT}/ss_submission'
 MS_WORK_DIR = f'{EVAL_ROOT}/ms_submission'
 SS_PREFIX = f'{SS_WORK_DIR}/orbdet_v0_2_msrr_stage1_epoch3_ss_task1'
 MS_PREFIX = f'{MS_WORK_DIR}/orbdet_v0_2_msrr_stage1_epoch3_msrr_task1'
+
+
+def _write_checkpoint(path: Path, *, epoch: int = 3, iteration: int = 51246):
+    torch.save(
+        dict(
+            meta=dict(
+                epoch=epoch,
+                iter=iteration,
+                cfg='OrbdetV02Detector trainval_ms_full'),
+            state_dict={
+                'weight': torch.ones(1),
+                'bias': torch.zeros(1),
+            }), path)
+
+
+def test_checkpoint_validator_accepts_exact_training_contract(tmp_path):
+    checkpoint = tmp_path / 'epoch_3.pth'
+    _write_checkpoint(checkpoint)
+
+    result = subprocess.run(
+        [
+            sys.executable, str(CHECKPOINT_VALIDATOR), str(checkpoint),
+            '--expected-epoch', '3', '--expected-iter', '51246',
+            '--expected-state-tensors', '2', '--config-token',
+            'OrbdetV02Detector', '--config-token', 'trainval_ms_full'
+        ],
+        check=False,
+        capture_output=True,
+        text=True)
+
+    assert result.returncode == 0, result.stderr
+    evidence = json.loads(result.stdout)
+    assert evidence['epoch'] == 3
+    assert evidence['iter'] == 51246
+    assert evidence['state_tensors'] == 2
+    assert len(evidence['sha256']) == 64
+
+
+def test_checkpoint_validator_rejects_wrong_epoch(tmp_path):
+    checkpoint = tmp_path / 'epoch_3.pth'
+    _write_checkpoint(checkpoint, epoch=2)
+
+    result = subprocess.run(
+        [
+            sys.executable, str(CHECKPOINT_VALIDATOR), str(checkpoint),
+            '--expected-epoch', '3', '--expected-iter', '51246'
+        ],
+        check=False,
+        capture_output=True,
+        text=True)
+
+    assert result.returncode != 0
+    assert 'epoch mismatch: expected 3, got 2' in result.stderr
 
 
 def test_stage3_eval_configs_preserve_trained_model_contract():
@@ -125,7 +184,12 @@ def test_stage3_posteval_launcher_is_sequential_fail_fast_and_gpu4567_safe():
             '--master_port=29666', '--master_port=29667',
             'TRAINVAL_COMPLETE', 'SS_SUBMISSION_COMPLETE',
             'MS_SUBMISSION_COMPLETE', 'COMPLETE', 'FAILED',
-            'archive.testzip() is None'):
+            'archive.testzip() is None', CHECKPOINT_VALIDATOR.name,
+            '--expected-epoch 3', '--expected-iter 51246',
+            '--expected-state-tensors 371',
+            '--config-token OrbdetV02Detector',
+            '--config-token trainval_ms_full', 'CHECKPOINT_VALIDATED',
+            'checkpoint_contract.json'):
         assert required in text, required
     assert text.index(TRAINVAL_CONFIG.name) < text.index(
         SS_CONFIG.name) < text.index(MS_CONFIG.name)

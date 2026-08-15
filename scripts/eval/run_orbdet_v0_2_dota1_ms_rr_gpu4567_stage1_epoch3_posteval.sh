@@ -3,6 +3,7 @@ set -euo pipefail
 
 repo_root="$(rtk realpath "$(rtk dirname "${BASH_SOURCE[0]}")/../..")"
 python_bin=/data/zcy/anaconda3/envs/orbdet/bin/python
+checkpoint_validator="${repo_root}/tools/analysis_tools/validate_checkpoint_contract.py"
 stage_root=/data1/zcy/Orbdet/work_dirs/formal/orbdet_v0_2_r50_dota1_ms_rr_gpu4567_seed3407_stage1_3e_20260816
 checkpoint="${stage_root}/epoch_3.pth"
 stage_complete="${stage_root}/COMPLETE"
@@ -76,6 +77,13 @@ if [[ -e "${status_dir}/RUNNING" || -e "${status_dir}/COMPLETE" || \
 fi
 
 rtk touch "${status_dir}/RUNNING"
+
+rtk env PYTHONNOUSERSITE=1 "${python_bin}" "${checkpoint_validator}" \
+  "${checkpoint}" --expected-epoch 3 --expected-iter 51246 \
+  --expected-state-tensors 371 --config-token OrbdetV02Detector \
+  --config-token trainval_ms_full | \
+  rtk tee "${status_dir}/checkpoint_contract.json"
+rtk touch "${status_dir}/CHECKPOINT_VALIDATED"
 
 rtk env PYTHONNOUSERSITE=1 PYTHONPATH="${repo_root}" \
   MPLCONFIGDIR=/tmp/zcy-codex/mplconfig OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \

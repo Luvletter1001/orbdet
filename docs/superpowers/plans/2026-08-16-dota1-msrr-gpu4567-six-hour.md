@@ -65,5 +65,6 @@
 - [x] Preserve the stage-1 model contract and build the exact 20,995 / 10,833 /
   71,888-patch datasets.
 - [x] Add sequential fail-fast trainval, SS, and MS evaluation with ZIP CRC checks.
+- [x] Add a real checkpoint deserialization/metadata/SHA256 gate before inference.
 - [x] Add an absolute 09:50 deadline and a 1,800-second admission gate.
 - [ ] Arm the bounded watcher and record its terminal state without starting epoch 4.
