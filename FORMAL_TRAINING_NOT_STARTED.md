@@ -1,6 +1,6 @@
 ---
-formal_train_status: complete
-formal_train_stage: orbdet_tasks_1_2_3_complete
+formal_train_status: running
+formal_train_stage: dota1_msrr_gpu4567_stage1_3e
 user_explicit_authorization_required: satisfied
 authorized_scope: orbdet_v0.2_hrsc_clean_gpu89
 authorized_additional_scope: orbdet_tasks_1_2_3_gpu89
@@ -25,17 +25,26 @@ dota_v1_code_status: tests_passed_68
 dota_v1_smoke_status: complete_2_steps
 dota_v1_formal_status: complete_epoch12
 held_out_test_policy: not_run
+dota1_msrr_gpu4567_audit_status: complete
+dota1_msrr_gpu4567_smoke_status: complete_2_steps
+dota1_msrr_gpu4567_stage1_status: running_epoch1
+dota1_msrr_gpu4567_authorized_gpus: 4,5,6,7
+dota1_msrr_gpu4567_authorized_at: 2026-08-16T03:59:00+08:00
+dota1_msrr_gpu4567_started_at: 2026-08-16T04:39:47+08:00
+dota1_msrr_gpu4567_deadline: 2026-08-16T09:55:00+08:00
+dota1_msrr_gpu4567_tmux: orbdet_msrr4567_6h_20260816
 v02_worktree: /data1/zcy/Orbdet/.worktrees/v02-stability
 godc_worktree: /data1/zcy/Orbdet/.worktrees/godc-integration
 dota_v1_worktree: /data1/zcy/Orbdet/.worktrees/dota-v1-formal
-updated_at: 2026-08-15T12:53:31+08:00
+updated_at: 2026-08-16T04:41:40+08:00
 ---
 
 # 正式训练状态
 
-用户授权的任务 1、2、3 已全部完成。所有正式训练均使用物理 GPU 8/9，
-并设置 `CUDA_VISIBLE_DEVICES=8,9`、`NCCL_P2P_DISABLE=1` 与
-`NCCL_IB_DISABLE=1`。训练产物与 Git 历史只保存在本地，没有推送远端。
+用户授权的任务 1、2、3 已全部完成；2026-08-16 新增的任务 4 正在运行。此前
+正式训练使用物理 GPU 8/9，任务 4 使用 GPU 4–7。所有分布式运行均设置
+`NCCL_P2P_DISABLE=1` 与 `NCCL_IB_DISABLE=1`。训练产物与 Git 历史只保存
+在本地，没有推送远端。
 
 > 文件名为早期安全门的兼容路径；本页 front matter 与正文是当前权威状态。
 
@@ -74,6 +83,18 @@ updated_at: 2026-08-15T12:53:31+08:00
   `work_dirs/formal/orbdet_v02_dota1_after_godc_gpu89_20260815/COMPLETE`。
 - DOTA prepared trainval 没有独立 validation split，因此本次合同不运行
   validation，也不报告训练集伪验证 `mAP`；hidden test 未运行。
+
+## 任务 4：Orbdet-v0.2 DOTA-v1 MS+RR GPU4567 stage 1
+
+- 用户授权六小时 GPU 4–7 窗口；完整 12E 无法在该窗口内完成，因此本轮只运行
+  可续训的 epoch 1–3，每 epoch 保存 checkpoint。
+- 官方 SS/MS+RR checkpoint 审计已完成；SS trainval `mAP=0.8131`，两份
+  submission ZIP 均通过 15 文件与压缩完整性检查。
+- 四 rank 两步 smoke 已完成并生成 `epoch_1.pth`。
+- stage 1 于 2026-08-16 04:39:47 启动，当前位于 epoch 1；初始 ETA 约
+  4 小时 42 分。控制器硬截止约为 09:55。
+- `tmux_session=orbdet_msrr4567_6h_20260816`；完整 12E 状态仍为
+  `not_complete`，后续 resume 需要用户再次明确授权。
 
 ## 验收与安全
 

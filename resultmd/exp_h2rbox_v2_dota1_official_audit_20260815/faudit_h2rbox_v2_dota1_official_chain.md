@@ -3,8 +3,9 @@
 ## 当前结论
 
 官方 SS 与 MS+RR checkpoint 已从 OpenMMLab 模型库下载并完成哈希、metadata
-与 `strict=True` 模型加载检查。三套推理配置和顺序审计 launcher 已通过合同测试；
-GPU 推理尚未启动，因为物理 GPU 8/9 当前存在容器外不可见的计算进程，不能抢占。
+与 `strict=True` 模型加载检查。2026-08-16 使用物理 GPU 4–7 完成三段正式推理
+审计：SS trainval self-eval 为 `mAP=0.8131`、`AP50=0.8130`，SS 与 MS+RR
+submission 均完成 patch merge，并分别生成通过完整性检查的 15 文件 ZIP。
 
 一次沙箱内拒绝路径检查因无法访问宿主 NVIDIA driver 返回 exit 9；同一 launcher
 在宿主 GPU 权限下正确返回 exit 6：`GPU 8/9 are not idle`。该次非实验性空
@@ -19,7 +20,26 @@ GPU 推理尚未启动，因为物理 GPU 8/9 当前存在容器外不可见的�
 | checkpoint_state_tensors | 371 | 371 |
 | checkpoint_sha256 | `fa5ad1d2d6d030a477fe6f9a405863a76f55d463cff31b7e01c8366527888fde` | `5e0e53e12e0d8b07f79922b6cef9b56c142458483d2c1e2f27348f7e72e9d677` |
 | strict_load | pass | pass |
-| inference_status | waiting_gpu_idle | waiting_gpu_idle |
+| inference_status | pass | pass |
+
+## 2026-08-16 GPU4567 实际结果
+
+| field | SS | MS+RR |
+|---|---|---|
+| physical_gpus | 4,5,6,7 | 4,5,6,7 |
+| nproc | 4 | 4 |
+| patch_count | 10,833 | 71,888 |
+| trainval_mAP | `0.8131` | N/A |
+| trainval_AP50 | `0.8130` | N/A |
+| zip_files | 15 | 15 |
+| zip_test | pass | pass |
+| zip_sha256 | `fd298f9028ac7805ddddf64d4515d6a3da56a9d418c6295893caa3517ced4fa7` | `75b76cb1d8a94192a41b6fbc3d5665018c573958f5b8a6c17abf0631047a6aab` |
+
+SS 与 MS+RR ZIP 分别约 9.2 MiB 与 18 MiB。两次启动器问题均在 GPU 训练
+开始前 fail-fast：第一次为 GNU `timeout` 时间格式，第二次为 GPU89 配置内嵌
+`outfile_prefix`。问题已按 TDD 修复，失败目录保留在带
+`failed_invalid_timeout` / `failed_outfile_prefix` 后缀的 runtime 路径，没有覆盖
+正式通过结果。
 
 官方入口：
 
@@ -81,3 +101,11 @@ scale 除法。
   `scripts/eval/run_h2rbox_v2_dota1_official_checkpoint_audit_gpu89.sh`
 - runtime root：
   `work_dirs/audit/h2rbox_v2_dota1_official_20260815/`
+- GPU4567 audit launcher：
+  `scripts/eval/run_h2rbox_v2_dota1_official_checkpoint_audit_gpu4567.sh`
+- GPU4567 runtime root：
+  `work_dirs/audit/h2rbox_v2_dota1_official_gpu4567_20260816/`
+- SS ZIP：
+  `work_dirs/audit/h2rbox_v2_dota1_official_gpu4567_20260816/ss_submission/h2rbox_v2_official_ss_task1/h2rbox_v2_official_ss_task1.zip`
+- MS+RR ZIP：
+  `work_dirs/audit/h2rbox_v2_dota1_official_gpu4567_20260816/ms_submission/h2rbox_v2_official_msrr_task1/h2rbox_v2_official_msrr_task1.zip`
