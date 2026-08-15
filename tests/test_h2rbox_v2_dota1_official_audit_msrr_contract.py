@@ -45,6 +45,41 @@ FORMAL_LAUNCHER = (
     ROOT / 'scripts/formal/'
     'run_orbdet_v0_2_r50_dota1_ms_rr_1x_gpu89_seed3407.sh')
 
+GPU4567_AUDIT_ROOT = Path(
+    '/data1/zcy/Orbdet/work_dirs/audit/'
+    'h2rbox_v2_dota1_official_gpu4567_20260816')
+GPU4567_FORMAL_CONFIG = (
+    ROOT / 'configs/orbdet/'
+    'orbdet_v0_2_r50_dota1_ms_rr_1x_gpu4567.py')
+GPU4567_SMOKE_CONFIG = (
+    ROOT / 'configs/orbdet/'
+    'orbdet_v0_2_r50_dota1_ms_rr_1x_gpu4567_smoke.py')
+GPU4567_STAGE1_CONFIG = (
+    ROOT / 'configs/orbdet/'
+    'orbdet_v0_2_r50_dota1_ms_rr_1x_gpu4567_stage1_3e.py')
+GPU4567_AUDIT_LAUNCHER = (
+    ROOT / 'scripts/eval/'
+    'run_h2rbox_v2_dota1_official_checkpoint_audit_gpu4567.sh')
+GPU4567_SMOKE_LAUNCHER = (
+    ROOT / 'scripts/smoke/'
+    'run_orbdet_v0_2_r50_dota1_ms_rr_gpu4567_smoke.sh')
+GPU4567_STAGE1_LAUNCHER = (
+    ROOT / 'scripts/formal/'
+    'run_orbdet_v0_2_r50_dota1_ms_rr_gpu4567_stage1_3e.sh')
+GPU4567_WINDOW_LAUNCHER = (
+    ROOT / 'scripts/formal/'
+    'run_orbdet_v0_2_r50_dota1_ms_rr_gpu4567_six_hour_window.sh')
+
+GPU4567_FORMAL_WORK_DIR = (
+    '/data1/zcy/Orbdet/work_dirs/formal/'
+    'orbdet_v0_2_r50_dota1_ms_rr_1x_gpu4567_seed3407_20260816')
+GPU4567_SMOKE_WORK_DIR = (
+    '/data1/zcy/Orbdet/work_dirs/smoke/'
+    'orbdet_v0_2_r50_dota1_ms_rr_1x_gpu4567_20260816')
+GPU4567_STAGE1_WORK_DIR = (
+    '/data1/zcy/Orbdet/work_dirs/formal/'
+    'orbdet_v0_2_r50_dota1_ms_rr_gpu4567_seed3407_stage1_3e_20260816')
+
 SS_SHA256 = 'fa5ad1d2d6d030a477fe6f9a405863a76f55d463cff31b7e01c8366527888fde'
 MSRR_SHA256 = '5e0e53e12e0d8b07f79922b6cef9b56c142458483d2c1e2f27348f7e72e9d677'
 FORMAL_WORK_DIR = (
@@ -240,3 +275,64 @@ def test_launchers_are_fail_fast_and_gpu89_safe():
         assert 'rm -' not in text
 
     assert str(AUDIT_ROOT / 'COMPLETE') in FORMAL_LAUNCHER.read_text()
+
+
+def test_gpu4567_six_hour_stage_contract():
+    formal = Config.fromfile(GPU4567_FORMAL_CONFIG)
+    smoke = Config.fromfile(GPU4567_SMOKE_CONFIG)
+    stage1 = Config.fromfile(GPU4567_STAGE1_CONFIG)
+
+    assert formal.train_dataloader.batch_size == 1
+    assert formal.train_dataloader.sampler.type == 'DefaultSampler'
+    assert formal.train_dataloader.batch_sampler is None
+    assert formal.optim_wrapper.optimizer.lr == 0.0001
+    assert formal.optim_wrapper.optimizer.weight_decay == 0.005
+    assert formal.train_cfg.max_epochs == 12
+    assert formal.default_hooks.checkpoint.interval == 1
+    assert formal.default_hooks.checkpoint.save_last is True
+    assert formal.work_dir == GPU4567_FORMAL_WORK_DIR
+
+    assert smoke.train_dataloader.batch_size == 1
+    assert smoke.train_dataloader.dataset.indices == 8
+    assert smoke.train_cfg.max_epochs == 1
+    assert smoke.param_scheduler[0].end == 2
+    assert smoke.work_dir == GPU4567_SMOKE_WORK_DIR
+
+    assert stage1.train_cfg.max_epochs == 3
+    assert stage1.default_hooks.checkpoint.interval == 1
+    assert stage1.work_dir == GPU4567_STAGE1_WORK_DIR
+    assert stage1.resume is False
+
+    launchers = (
+        (GPU4567_AUDIT_LAUNCHER, '--master_port=29660'),
+        (GPU4567_SMOKE_LAUNCHER, '--master_port=29663'),
+        (GPU4567_STAGE1_LAUNCHER, '--master_port=29664'),
+    )
+    for launcher, port in launchers:
+        text = launcher.read_text()
+        for required in (
+                'set -euo pipefail', 'CUDA_VISIBLE_DEVICES=4,5,6,7',
+                'NCCL_P2P_DISABLE=1', 'NCCL_IB_DISABLE=1',
+                '--nproc_per_node=4', port, 'gpu_processes'):
+            assert required in text, (launcher, required)
+        assert 'rm -' not in text
+
+    audit = GPU4567_AUDIT_LAUNCHER.read_text()
+    assert '--master_port=29661' in audit
+    assert '--master_port=29662' in audit
+    assert str(GPU4567_AUDIT_ROOT) in audit
+
+    stage_launcher = GPU4567_STAGE1_LAUNCHER.read_text()
+    assert GPU4567_STAGE1_CONFIG.name in stage_launcher
+    assert GPU4567_STAGE1_WORK_DIR in stage_launcher
+    assert 'epoch_3.pth' in stage_launcher
+    assert '--resume' not in stage_launcher
+
+    window = GPU4567_WINDOW_LAUNCHER.read_text()
+    assert '5h45m' in window
+    assert 'timeout' in window
+    assert window.index(GPU4567_AUDIT_LAUNCHER.name) < window.index(
+        GPU4567_SMOKE_LAUNCHER.name) < window.index(
+            GPU4567_STAGE1_LAUNCHER.name)
+    assert 'CUDA_VISIBLE_DEVICES=8,9' not in window
+    assert 'rm -' not in window
