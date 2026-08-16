@@ -17,6 +17,19 @@ def _validate_order(order):
     return order
 
 
+def _validate_finite_real(value, name: str, *, positive: bool) -> None:
+    if isinstance(value, bool) or (isinstance(value, Tensor)
+                                   and value.dtype == torch.bool):
+        raise ValueError(f'{name} must not be boolean')
+    try:
+        is_finite = math.isfinite(value)
+    except (TypeError, ValueError):
+        raise ValueError(f'{name} must be a finite real number') from None
+    if not is_finite or (value <= 0 if positive else value < 0):
+        bound = 'positive' if positive else 'non-negative'
+        raise ValueError(f'{name} must be finite and {bound}')
+
+
 def _validate_vector(vector: Tensor, name: str) -> None:
     if not isinstance(vector, Tensor):
         raise ValueError(f'{name} must be a Tensor')
@@ -37,11 +50,16 @@ def _promoted_float(vector: Tensor) -> Tensor:
 def normalize_harmonic(vector: Tensor, eps: float = 1e-8) -> Tensor:
     """Normalize harmonic carrier vectors while leaving zero vectors zero."""
     _validate_vector(vector, 'vector')
-    if not math.isfinite(eps) or eps <= 0:
-        raise ValueError('eps must be finite and positive')
+    _validate_finite_real(eps, 'eps', positive=True)
     vector = _promoted_float(vector)
-    return vector / (torch.linalg.vector_norm(vector, dim=-1, keepdim=True) +
-                     eps)
+    scale = vector.abs().amax(dim=-1, keepdim=True)
+    normalization_scale = torch.where(scale > 1, scale, torch.ones_like(scale))
+    scaled = vector / normalization_scale
+    denominator = (
+        torch.linalg.vector_norm(scaled, dim=-1, keepdim=True) +
+        eps / normalization_scale)
+    normalized = scaled / denominator
+    return torch.where(scale > 0, normalized, torch.zeros_like(normalized))
 
 
 def induced_harmonic_action(transform: Tensor,
@@ -57,8 +75,7 @@ def induced_harmonic_action(transform: Tensor,
         raise ValueError('transform must have a floating-point dtype')
     if not torch.isfinite(transform).all():
         raise ValueError('transform must contain only finite values')
-    if not math.isfinite(atol) or atol < 0:
-        raise ValueError('atol must be finite and non-negative')
+    _validate_finite_real(atol, 'atol', positive=False)
 
     transform = _promoted_float(transform)
     identity = torch.eye(2, dtype=transform.dtype, device=transform.device)
@@ -68,8 +85,9 @@ def induced_harmonic_action(transform: Tensor,
         raise ValueError('transform must be orthogonal')
 
     determinant = torch.linalg.det(transform)
-    if not torch.allclose(determinant.abs(), torch.ones_like(determinant),
-                          atol=atol, rtol=atol):
+    if not torch.allclose(
+            determinant.abs(), torch.ones_like(determinant), atol=atol,
+            rtol=atol):
         raise ValueError('transform determinant must have absolute value one')
 
     phi = torch.atan2(transform[..., 1, 0], transform[..., 0, 0])
@@ -78,10 +96,11 @@ def induced_harmonic_action(transform: Tensor,
     action = torch.stack((
         torch.stack((cosine, -sine), dim=-1),
         torch.stack((sine, cosine), dim=-1),
-    ), dim=-2)
-    reflection = torch.tensor(
-        [[1.0, 0.0], [0.0, -1.0]], dtype=transform.dtype,
-        device=transform.device)
+    ),
+                         dim=-2)
+    reflection = torch.tensor([[1.0, 0.0], [0.0, -1.0]],
+                              dtype=transform.dtype,
+                              device=transform.device)
     reflected_action = action @ reflection
     return torch.where((determinant < 0)[..., None, None], reflected_action,
                        action)
@@ -107,12 +126,10 @@ class SCQOHarmonicEquivarianceLoss(torch.nn.Module):
                  loss_weight: float = 1.0):
         super().__init__()
         self.order = _validate_order(order)
-        if not math.isfinite(eps) or eps <= 0:
-            raise ValueError('eps must be finite and positive')
+        _validate_finite_real(eps, 'eps', positive=True)
         if reduction not in ('none', 'mean', 'sum'):
             raise ValueError('reduction must be one of none, mean, or sum')
-        if not math.isfinite(loss_weight) or loss_weight < 0:
-            raise ValueError('loss_weight must be finite and non-negative')
+        _validate_finite_real(loss_weight, 'loss_weight', positive=False)
         self.eps = eps
         self.reduction = reduction
         self.loss_weight = loss_weight
@@ -123,43 +140,45 @@ class SCQOHarmonicEquivarianceLoss(torch.nn.Module):
                 transform: Tensor,
                 weight: Optional[Tensor] = None,
                 reduction_override: Optional[str] = None) -> Tensor:
-        """Compute a bounded equivariance discrepancy in ``[0, 2]``."""
+        """Compute discrepancies; only unweighted samples lie in ``[0, 2]``."""
         _validate_vector(reference, 'reference')
         _validate_vector(view, 'view')
         if reference.shape != view.shape:
             raise ValueError('reference and view must have the same shape')
         action = induced_harmonic_action(transform, self.order)
         if action.shape[:-2] != reference.shape[:-1]:
-            raise ValueError('action batch shape must match vector batch shape')
+            raise ValueError(
+                'action batch shape must match vector batch shape')
         if reduction_override not in (None, 'none', 'mean', 'sum'):
             raise ValueError('invalid reduction_override')
 
         dtype = torch.promote_types(
-            torch.promote_types(_promoted_float(reference).dtype,
-                                _promoted_float(view).dtype),
+            torch.promote_types(
+                _promoted_float(reference).dtype,
+                _promoted_float(view).dtype),
             _promoted_float(action).dtype)
         reference_unit = normalize_harmonic(reference, self.eps).to(dtype)
         view_unit = normalize_harmonic(view, self.eps).to(dtype)
         action = _promoted_float(action).to(dtype)
-        expected = torch.matmul(action, reference_unit.unsqueeze(-1)).squeeze(-1)
+        expected = torch.matmul(action,
+                                reference_unit.unsqueeze(-1)).squeeze(-1)
         loss = torch.clamp(1 - (view_unit * expected).sum(dim=-1), 0, 2)
 
         if weight is not None:
             if not isinstance(weight, Tensor):
-                weight = torch.as_tensor(weight, dtype=dtype,
-                                         device=loss.device)
-            else:
-                if weight.is_complex() or weight.dtype == torch.bool:
-                    raise ValueError('weight must have a real numeric dtype')
-                weight = weight.to(dtype=dtype, device=loss.device)
+                weight = torch.as_tensor(weight, device=loss.device)
+            if weight.is_complex() or weight.dtype == torch.bool:
+                raise ValueError('weight must have a real numeric dtype')
+            weight = weight.to(dtype=dtype, device=loss.device)
             if not torch.isfinite(weight).all() or torch.any(weight < 0):
                 raise ValueError('weight must be finite and non-negative')
             if weight.numel() == 1:
-                loss = loss * weight
+                loss = loss * weight.reshape(())
             elif weight.numel() == loss.numel():
                 loss = loss * weight.reshape(loss.shape)
             else:
-                raise ValueError('weight must be scalar or one per loss sample')
+                raise ValueError(
+                    'weight must be scalar or one per loss sample')
 
         reduction = reduction_override or self.reduction
         if reduction == 'none':
