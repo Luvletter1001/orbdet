@@ -59,7 +59,7 @@ def normalize_harmonic(vector: Tensor, eps: float = 1e-8) -> Tensor:
         torch.linalg.vector_norm(scaled, dim=-1, keepdim=True) +
         eps / normalization_scale)
     normalized = scaled / denominator
-    return torch.where(scale > 0, normalized, torch.zeros_like(normalized))
+    return normalized
 
 
 def induced_harmonic_action(transform: Tensor,

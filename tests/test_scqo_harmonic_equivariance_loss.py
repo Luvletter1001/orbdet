@@ -70,6 +70,22 @@ def test_zero_carriers_have_finite_unit_loss_without_reduction():
     assert torch.equal(loss, torch.ones(3))
 
 
+def test_zero_reference_has_a_finite_recovery_gradient():
+    from mmrotate.models.losses.scqo_harmonic_equivariance_loss import (
+        SCQOHarmonicEquivarianceLoss, )
+
+    reference = torch.zeros(2, requires_grad=True)
+    view = torch.tensor([1.0, 0.0])
+    loss = SCQOHarmonicEquivarianceLoss(reduction='sum')(reference, view,
+                                                         torch.eye(2))
+
+    loss.backward()
+
+    assert reference.grad is not None
+    assert torch.isfinite(reference.grad).all()
+    assert torch.any(reference.grad != 0)
+
+
 def test_singleton_weights_preserve_none_reduction_loss_shape():
     from mmrotate.models.losses.scqo_harmonic_equivariance_loss import (
         SCQOHarmonicEquivarianceLoss, )
