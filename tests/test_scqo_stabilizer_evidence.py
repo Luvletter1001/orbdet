@@ -78,6 +78,27 @@ def test_low_precision_is_finite_and_nan_is_rejected():
         evidence(torch.full((1, 1, 14, 14), float('nan')))
 
 
+@pytest.mark.parametrize('dtype', [torch.bool, torch.int64])
+def test_nonfloating_valid_support_is_rejected(dtype):
+    evidence = SCQOStabilizerEvidence(channels=1)
+    support = torch.ones(1, 1, 14, 14, dtype=dtype)
+
+    with pytest.raises(TypeError, match='floating'):
+        evidence(torch.randn(1, 1, 14, 14), valid_support=support)
+
+
+def test_half_converted_module_keeps_evidence_computation_in_float32():
+    evidence = SCQOStabilizerEvidence(channels=1).half()
+
+    result = evidence(torch.randn(1, 1, 14, 14).half())
+
+    assert all(
+        torch.isfinite(value).all() for value in result.values()
+        if value.dtype != torch.bool)
+    assert all(value.dtype == torch.float32 for value in result.values()
+               if value.dtype != torch.bool)
+
+
 def test_evidence_is_detached_and_negative_control_preserves_energy():
     evidence = SCQOStabilizerEvidence(channels=1)
     features = torch.randn(2, 1, 14, 14, requires_grad=True)

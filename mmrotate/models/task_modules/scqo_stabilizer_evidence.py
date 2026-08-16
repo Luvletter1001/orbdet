@@ -93,8 +93,10 @@ class SCQOStabilizerEvidence(torch.nn.Module):
         if batch_size == 0:
             return features.new_empty((0, ))
         flattened = features.reshape(batch_size * channels, 1, height, width)
-        grad_x = F.conv2d(flattened, self.sobel_x, padding=1)
-        grad_y = F.conv2d(flattened, self.sobel_y, padding=1)
+        sobel_x = self.sobel_x.to(device=features.device, dtype=features.dtype)
+        sobel_y = self.sobel_y.to(device=features.device, dtype=features.dtype)
+        grad_x = F.conv2d(flattened, sobel_x, padding=1)
+        grad_y = F.conv2d(flattened, sobel_y, padding=1)
         magnitude = torch.sqrt(grad_x.square() + grad_y.square() + 1e-12)
         angle = torch.atan2(grad_y, grad_x)
         weight = magnitude.reshape(batch_size, channels, height,
@@ -131,6 +133,8 @@ class SCQOStabilizerEvidence(torch.nn.Module):
                 raise TypeError('valid_support must be a torch.Tensor')
             if valid_support.shape != support_shape:
                 raise ValueError('valid_support must have shape [N, 1, H, W]')
+            if not valid_support.is_floating_point():
+                raise TypeError('valid_support must be floating point')
             valid_support = valid_support.detach().to(
                 device=features.device, dtype=features.dtype)
             if not bool(torch.isfinite(valid_support).all()):
@@ -139,7 +143,8 @@ class SCQOStabilizerEvidence(torch.nn.Module):
             valid_support = valid_support.clamp(0.0, 1.0)
 
         support_fraction = valid_support.mean(dim=(1, 2, 3))
-        support = valid_support * self.hann
+        hann = self.hann.to(device=features.device, dtype=features.dtype)
+        support = valid_support * hann
         energy = features.square().mean(dim=(1, 2, 3))
         variance = features.var(dim=(1, 2, 3), unbiased=False)
         scale = torch.sqrt(energy).clamp_min(1e-8).reshape(batch_size, 1, 1, 1)
