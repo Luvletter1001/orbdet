@@ -2,11 +2,13 @@ import argparse
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
 import subprocess
 import sys
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import torch
 from mmengine.structures import InstanceData
@@ -16,6 +18,7 @@ from mmdet.structures import DetDataSample
 from mmrotate.structures import RotatedBoxes
 
 from tools.analysis_tools import scqo_collect_evidence as collector
+from tools.analysis_tools import scqo_report_evidence as reporter
 from tools.analysis_tools.scqo_collect_evidence import (_evidence_cfg, _scalar,
                                                         build_evidence_row,
                                                         collect, parse_args,
@@ -23,6 +26,7 @@ from tools.analysis_tools.scqo_collect_evidence import (_evidence_cfg, _scalar,
 
 ROOT = Path(__file__).resolve().parents[1]
 COLLECTOR = ROOT / 'tools/analysis_tools/scqo_collect_evidence.py'
+REPORTER = ROOT / 'tools/analysis_tools/scqo_report_evidence.py'
 
 
 def _arguments(tmp_path, *, max_images=None):
@@ -681,6 +685,449 @@ def test_atomic_publication_never_overwrites_a_racing_output(
 
 def test_collector_cannot_start_training_or_overwrite_status():
     text = COLLECTOR.read_text()
+    forbidden = ('tools/train.py', 'train_step(', 'optim_wrapper', 'tmux',
+                 'nohup', 'FORMAL_TRAINING_NOT_STARTED.md')
+    assert all(token not in text for token in forbidden)
+
+
+def _synthetic_report_rows(run_name='synthetic'):
+    rows = []
+    for image_index in range(30):
+        for local in range(4):
+            target = local >= 2
+            rows.append(
+                dict(
+                    run_name=run_name,
+                    image_id=str(image_index),
+                    gt_index=local,
+                    label=0,
+                    evidence_available=True,
+                    matched=True,
+                    rotated_iou=0.8,
+                    angle_error_deg=20.0 if target else 2.0,
+                    angle_error_c4_deg=5.0 if target else 2.0,
+                    large_angle_error=target,
+                    c2_determinantal=0.1,
+                    c2_spectral_tail=0.1,
+                    c2_fixed_space=0.1,
+                    c2_q_gap=0.9,
+                    c4_determinantal=float(target),
+                    c4_spectral_tail=float(target),
+                    c4_fixed_space=float(target),
+                    c4_q_gap=float(not target),
+                    energy=1.0,
+                    variance=0.5 + 0.001 * image_index,
+                    energy_guard=0.0,
+                    variance_guard=0.0,
+                    support_fraction=1.0,
+                    fpn_level=image_index % 3,
+                    gt_width=8.0 + image_index,
+                    gt_height=4.0,
+                    gt_area=(8.0 + image_index) * 4.0,
+                    gt_aspect_ratio=(8.0 + image_index) / 4.0,
+                    a2=float(not target),
+                    a4=float(target),
+                    negative_energy=1.0,
+                    c4_negative_margin=float(target),
+                    valid=True))
+    return rows
+
+
+def _write_jsonl(path, rows):
+    path.write_text(
+        ''.join(
+            json.dumps(row, allow_nan=False, sort_keys=True) + '\n'
+            for row in rows),
+        encoding='utf-8')
+
+
+def _run_reporter(source_paths, output):
+    return subprocess.run([
+        sys.executable,
+        str(REPORTER), *(str(path) for path in source_paths), '--output-dir',
+        str(output)
+    ],
+                          cwd=ROOT,
+                          check=False,
+                          capture_output=True,
+                          env={
+                              **os.environ, 'PYTHONPATH': str(ROOT)
+                          },
+                          text=True)
+
+
+def test_reporter_writes_pass_evidence_without_persisting_probe(tmp_path):
+    source = tmp_path / 'rows.jsonl'
+    _write_jsonl(source, _synthetic_report_rows())
+    output = tmp_path / 'report'
+
+    completed = _run_reporter([source], output)
+
+    assert completed.returncode == 0, completed.stderr
+    summary_text = (output / 'summary.json').read_text(encoding='utf-8')
+    summary = json.loads(summary_text)
+    result = summary['runs']['synthetic']
+    assert result['gate_b'] == 'PASS'
+    assert result['combined_auroc'] >= 0.65
+    assert result['auroc_gain'] >= 0.05
+    assert all(value > 0.5 for value in result['stratified_aurocs']['texture'])
+    assert set(result['stratified_aurocs']) == {
+        'texture', 'aspect_ratio', 'area', 'label', 'fpn_level'
+    }
+    assert result['angle_error_e2']['median'] == pytest.approx(11.0)
+    assert result['angle_error_e4']['median'] == pytest.approx(3.5)
+    reliability = result['combined_reliability']
+    assert sum(item['count']
+               for item in reliability) == result['eligible_rows']
+    recomputed_ece = sum(item['count'] / result['eligible_rows'] *
+                         abs(item['error_rate'] - item['confidence'])
+                         for item in reliability if item['count'])
+    assert recomputed_ece == pytest.approx(result['combined_ece'])
+    markdown = (output /
+                'fres_scqo_plan_a_hrsc_audit.md').read_text(encoding='utf-8')
+    assert '冻结 checkpoint' in markdown
+    assert 'HRSC validation' in markdown
+    assert 'PASS 只授权继续讨论 Plan B' in markdown
+    assert 'FAIL/INSUFFICIENT 均不得启动 E4' in markdown
+    assert 'NaN' not in summary_text
+    assert not list(output.glob('*.pth'))
+    assert not list(output.glob('*.pkl'))
+
+    repeated = _run_reporter([source], output)
+    assert repeated.returncode != 0
+    assert 'already exist' in repeated.stderr
+
+
+def _minimal_row(run_name='run', image_id='image', gt_index=0):
+    return dict(
+        run_name=run_name,
+        image_id=image_id,
+        gt_index=gt_index,
+        label=0,
+        evidence_available=False,
+        matched=False)
+
+
+def _load_rows(tmp_path, rows, name='rows.jsonl'):
+    source = tmp_path / name
+    _write_jsonl(source, rows)
+    return reporter.load_rows([source])
+
+
+def test_reporter_help_lists_required_inputs():
+    completed = subprocess.run(
+        [sys.executable, str(REPORTER), '--help'],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        env={
+            **os.environ, 'PYTHONPATH': str(ROOT)
+        },
+        text=True)
+
+    assert completed.returncode == 0
+    assert 'evidence' in completed.stdout
+    assert '--output-dir' in completed.stdout
+
+
+def test_reporter_merges_same_run_deterministically_across_sources(tmp_path):
+    rows = [_minimal_row(image_id=str(index)) for index in range(20)]
+    first = tmp_path / 'b.jsonl'
+    second = tmp_path / 'a.jsonl'
+    _write_jsonl(first, rows[::2])
+    _write_jsonl(second, rows[1::2])
+
+    forward = reporter.report([first, second], tmp_path / 'forward')
+    reverse = reporter.report([second, first], tmp_path / 'reverse')
+
+    assert forward == reverse
+    assert forward['evidence'] == sorted(forward['evidence'])
+    assert forward['runs']['run']['total_rows'] == 20
+    assert forward['runs']['run']['gate_b'] == 'INSUFFICIENT'
+    assert (tmp_path / 'forward' /
+            'summary.json').read_bytes() == (tmp_path / 'reverse' /
+                                             'summary.json').read_bytes()
+
+
+def test_reporter_rejects_duplicate_identity_across_sources(tmp_path):
+    first = tmp_path / 'first.jsonl'
+    second = tmp_path / 'second.jsonl'
+    row = _minimal_row()
+    _write_jsonl(first, [row])
+    _write_jsonl(second, [row])
+
+    with pytest.raises(ValueError, match='duplicate evidence identity'):
+        reporter.report([first, second], tmp_path / 'report')
+
+    assert not (tmp_path / 'report').exists()
+
+
+@pytest.mark.parametrize(('payload', 'message'), [
+    ('', 'no rows'),
+    ('\n', 'blank JSONL'),
+    ('not-json\n', 'valid finite JSON'),
+    ('[]\n', 'JSON object'),
+    ('{"run_name": NaN}\n', 'non-finite JSON'),
+])
+def test_reporter_rejects_empty_blank_malformed_or_nonfinite_jsonl(
+        tmp_path, payload, message):
+    source = tmp_path / 'bad.jsonl'
+    source.write_text(payload, encoding='utf-8')
+
+    with pytest.raises(ValueError, match=message):
+        reporter.load_rows([source])
+
+
+def test_reporter_rejects_missing_or_non_file_sources(tmp_path):
+    with pytest.raises(FileNotFoundError, match='does not exist'):
+        reporter.load_rows([tmp_path / 'missing.jsonl'])
+    with pytest.raises(ValueError, match='readable file'):
+        reporter.load_rows([tmp_path])
+
+
+@pytest.mark.parametrize('field', [
+    'run_name', 'image_id', 'gt_index', 'label', 'evidence_available',
+    'matched'
+])
+def test_reporter_requires_base_identity_fields(tmp_path, field):
+    row = _minimal_row()
+    del row[field]
+
+    with pytest.raises(ValueError, match='required fields'):
+        _load_rows(tmp_path, [row])
+
+
+@pytest.mark.parametrize(('field', 'value'), [
+    ('evidence_available', 1),
+    ('matched', 0),
+    ('valid', 1),
+    ('large_angle_error', 1),
+])
+def test_reporter_requires_strict_boolean_fields_even_when_optional(
+        tmp_path, field, value):
+    row = _minimal_row()
+    row[field] = value
+
+    with pytest.raises(ValueError, match='boolean'):
+        _load_rows(tmp_path, [row])
+
+
+@pytest.mark.parametrize('field', [
+    *reporter.FEATURES, 'valid', 'fpn_level', 'gt_width', 'gt_height',
+    'gt_area', 'gt_aspect_ratio'
+])
+def test_reporter_requires_complete_available_evidence(tmp_path, field):
+    row = _synthetic_report_rows()[0]
+    del row[field]
+
+    with pytest.raises(ValueError, match='evidence fields'):
+        _load_rows(tmp_path, [row])
+
+
+@pytest.mark.parametrize('field', [
+    'rotated_iou', 'angle_error_deg', 'angle_error_c4_deg', 'large_angle_error'
+])
+def test_reporter_requires_complete_match_fields(tmp_path, field):
+    row = _synthetic_report_rows()[0]
+    del row[field]
+
+    with pytest.raises(ValueError, match='match fields'):
+        _load_rows(tmp_path, [row])
+
+
+def test_reporter_rejects_nonfinite_values_in_unrecognized_fields(tmp_path):
+    source = tmp_path / 'nonfinite.jsonl'
+    source.write_text(
+        json.dumps(_minimal_row())[:-1] + ', "extra": Infinity}\n',
+        encoding='utf-8')
+
+    with pytest.raises(ValueError, match='non-finite JSON'):
+        reporter.load_rows([source])
+
+
+def test_reporter_eligibility_and_fpn_rejection_use_registered_contract():
+    rows = _synthetic_report_rows()[:4]
+    rows[0]['evidence_available'] = False
+    rows[1]['matched'] = False
+    rows[2]['rotated_iou'] = 0.49
+    rows[3]['valid'] = False
+
+    result = reporter.summarize_run(rows)
+
+    assert result['eligible_rows'] == 0
+    assert result['gate_b'] == 'INSUFFICIENT'
+    assert sum(item['count'] for item in result['reject_by_fpn'].values()) == 3
+    assert sum(
+        item['count'] * item['reject_fraction']
+        for item in result['reject_by_fpn'].values()) == pytest.approx(1.0)
+
+
+def test_reporter_requires_fifteen_examples_in_each_error_class():
+    rows = _synthetic_report_rows()[:60]
+    changed = 0
+    for row in rows:
+        if row['large_angle_error'] and changed < 16:
+            row['large_angle_error'] = False
+            row['angle_error_deg'] = 2.0
+            changed += 1
+
+    result = reporter.summarize_run(rows)
+
+    assert len(rows) == 60
+    assert sum(row['large_angle_error'] for row in rows) == 14
+    assert result['gate_b'] == 'INSUFFICIENT'
+    assert '15 examples per class' in result['reason']
+
+
+def test_reporter_passes_image_identity_as_group_to_probe(monkeypatch):
+    rows = _synthetic_report_rows()
+    captured = []
+
+    def capture_groups(features, target, groups, **kwargs):
+        captured.append(tuple(groups))
+        return np.linspace(0.01, 0.99, len(target))
+
+    monkeypatch.setattr(reporter, 'cross_validated_logistic_probe',
+                        capture_groups)
+
+    reporter._probe(rows, ('energy', ))
+
+    assert captured == [tuple(row['image_id'] for row in rows)]
+    assert len(set(captured[0])) == 30
+
+
+def test_exact_gate_b_thresholds():
+    assert reporter._gate_b(0.65, 0.60, [0.51, 0.51, 0.51]) == 'PASS'
+    assert reporter._gate_b(0.6499, 0.50, [0.51, 0.51, 0.51]) == 'FAIL'
+    assert reporter._gate_b(0.70, 0.6501, [0.51, 0.51, 0.51]) == 'FAIL'
+    assert reporter._gate_b(0.70, 0.60, [0.50, 0.51, 0.51]) == 'FAIL'
+    assert reporter._gate_b(0.70, 0.60, [None, 0.51, 0.51]) == 'INSUFFICIENT'
+
+
+def _fake_probe(rows, feature_names):
+    target = np.asarray([float(row['angle_error_deg']) > 15.0 for row in rows],
+                        dtype=np.int64)
+    if tuple(feature_names) == reporter.FEATURES:
+        probability = np.where(target == 1, 0.9, 0.1)
+        auroc = 1.0
+    else:
+        probability = np.full(target.shape, 0.5)
+        auroc = 0.5
+    return dict(
+        probability=probability,
+        auroc=auroc,
+        auprc=reporter.binary_average_precision(target, probability),
+        ece=reporter.expected_calibration_error(target, probability),
+        reliability=reporter._reliability_curve(target, probability))
+
+
+def test_tied_or_one_class_variance_tertiles_are_insufficient(monkeypatch):
+    monkeypatch.setattr(reporter, '_probe', _fake_probe)
+    tied = _synthetic_report_rows()
+    for row in tied:
+        row['variance'] = 0.5
+
+    tied_result = reporter.summarize_run(tied)
+
+    assert tied_result['gate_b'] == 'INSUFFICIENT'
+    assert tied_result['stratified_aurocs']['texture'].count(None) == 2
+
+    one_class = _synthetic_report_rows()
+    for row in one_class:
+        row['variance'] = float(row['large_angle_error'])
+
+    one_class_result = reporter.summarize_run(one_class)
+
+    assert one_class_result['gate_b'] == 'INSUFFICIENT'
+    assert None in one_class_result['stratified_aurocs']['texture']
+
+
+def test_reporter_marks_nonseparating_evidence_fail(monkeypatch):
+    rows = _synthetic_report_rows()
+
+    def chance_probe(rows, feature_names):
+        target = np.asarray(
+            [float(row['angle_error_deg']) > 15.0 for row in rows],
+            dtype=np.int64)
+        probability = np.full(target.shape, 0.5)
+        return dict(
+            probability=probability,
+            auroc=0.5,
+            auprc=0.5,
+            ece=0.0,
+            reliability=reporter._reliability_curve(target, probability))
+
+    monkeypatch.setattr(reporter, '_probe', chance_probe)
+
+    result = reporter.summarize_run(rows)
+
+    assert result['gate_b'] == 'FAIL'
+
+
+@pytest.mark.parametrize('destination_kind', ['file', 'directory', 'symlink'])
+def test_reporter_refuses_any_existing_output_entry(tmp_path,
+                                                    destination_kind):
+    source = tmp_path / 'rows.jsonl'
+    _write_jsonl(source, [_minimal_row()])
+    output = tmp_path / 'report'
+    if destination_kind == 'file':
+        output.write_text('keep-me\n', encoding='utf-8')
+    elif destination_kind == 'directory':
+        output.mkdir()
+        (output / 'keep').write_text('keep-me\n', encoding='utf-8')
+    else:
+        output.symlink_to(tmp_path / 'missing-target')
+
+    with pytest.raises(FileExistsError, match='already exist'):
+        reporter.report([source], output)
+
+    assert os.path.lexists(output)
+
+
+def test_reporter_publishes_neither_file_if_rendering_fails(
+        tmp_path, monkeypatch):
+    source = tmp_path / 'rows.jsonl'
+    _write_jsonl(source, [_minimal_row()])
+    output = tmp_path / 'report'
+
+    def fail_render(summary):
+        raise RuntimeError('synthetic rendering failure')
+
+    monkeypatch.setattr(reporter, '_markdown', fail_render)
+
+    with pytest.raises(RuntimeError, match='synthetic rendering failure'):
+        reporter.report([source], output)
+
+    assert not os.path.lexists(output)
+    assert not list(tmp_path.glob('.report.tmp-*'))
+    assert not os.path.lexists(tmp_path / '.report.lock')
+
+
+def test_reporter_atomic_publish_never_replaces_a_racing_empty_directory(
+        tmp_path, monkeypatch):
+    source = tmp_path / 'rows.jsonl'
+    _write_jsonl(source, [_minimal_row()])
+    output = tmp_path / 'report'
+    real_publish = reporter._rename_directory_no_replace
+
+    def race_before_publish(staging, destination):
+        destination.mkdir()
+        real_publish(staging, destination)
+
+    monkeypatch.setattr(reporter, '_rename_directory_no_replace',
+                        race_before_publish)
+
+    with pytest.raises(FileExistsError):
+        reporter.report([source], output)
+
+    assert output.is_dir()
+    assert not list(output.iterdir())
+    assert not list(tmp_path.glob('.report.tmp-*'))
+    assert not os.path.lexists(tmp_path / '.report.lock')
+
+
+def test_all_plan_a_tools_cannot_start_training_or_overwrite_status():
+    text = COLLECTOR.read_text() + REPORTER.read_text()
     forbidden = ('tools/train.py', 'train_step(', 'optim_wrapper', 'tmux',
                  'nohup', 'FORMAL_TRAINING_NOT_STARTED.md')
     assert all(token not in text for token in forbidden)
