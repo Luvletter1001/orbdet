@@ -1240,6 +1240,71 @@ def test_reporter_rolls_back_our_first_link_but_preserves_racing_second_link(
     assert not os.path.lexists(output / '.scqo-report.lock')
 
 
+def test_reporter_preserves_racing_directory_replacing_created_output(
+        tmp_path, monkeypatch):
+    source = tmp_path / 'evidence.jsonl'
+    _write_jsonl(source, [_minimal_row()])
+    output = tmp_path / 'audit'
+    displaced = tmp_path / 'displaced-owned-directory'
+    racer_identity = {}
+
+    def replace_directory_then_fail(path, flags, mode=0o777, *, dir_fd=None):
+        assert Path(path) == output / '.scqo-report.lock'
+        output.rename(displaced)
+        output.mkdir()
+        racer_identity['value'] = os.lstat(output)
+        raise OSError('synthetic lock-open failure')
+
+    monkeypatch.setattr(reporter.os, 'open', replace_directory_then_fail)
+
+    with pytest.raises(OSError, match='synthetic lock-open failure'):
+        reporter.report([source], output)
+
+    assert output.is_dir()
+    current = os.lstat(output)
+    expected = racer_identity['value']
+    assert (current.st_dev, current.st_ino) == (expected.st_dev,
+                                                expected.st_ino)
+    assert displaced.is_dir()
+    assert not list(output.iterdir())
+
+
+def test_reporter_preserves_racing_temp_replacement_on_fsync_failure(
+        tmp_path, monkeypatch):
+    output = tmp_path / 'audit'
+    output.mkdir()
+    source = output / 'evidence.jsonl'
+    _write_jsonl(source, [_minimal_row()])
+    evidence_bytes = source.read_bytes()
+    racer = {}
+
+    def replace_temp_then_fail(descriptor):
+        candidates = list(output.glob('.summary.json.tmp-*'))
+        assert len(candidates) == 1
+        path = candidates[0]
+        path.unlink()
+        path.write_text('racing-temp\n', encoding='utf-8')
+        racer['path'] = path
+        racer['identity'] = os.lstat(path)
+        raise OSError('synthetic staged fsync failure')
+
+    monkeypatch.setattr(reporter.os, 'fsync', replace_temp_then_fail)
+
+    with pytest.raises(OSError, match='synthetic staged fsync failure'):
+        reporter.report([source], output)
+
+    racer_path = racer['path']
+    assert racer_path.read_text(encoding='utf-8') == 'racing-temp\n'
+    current = os.lstat(racer_path)
+    expected = racer['identity']
+    assert (current.st_dev, current.st_ino) == (expected.st_dev,
+                                                expected.st_ino)
+    assert source.read_bytes() == evidence_bytes
+    assert not os.path.lexists(output / 'summary.json')
+    assert not os.path.lexists(output / 'fres_scqo_plan_a_hrsc_audit.md')
+    assert not os.path.lexists(output / '.scqo-report.lock')
+
+
 def test_all_plan_a_tools_cannot_start_training_or_overwrite_status():
     text = COLLECTOR.read_text() + REPORTER.read_text()
     forbidden = ('tools/train.py', 'train_step(', 'optim_wrapper', 'tmux',

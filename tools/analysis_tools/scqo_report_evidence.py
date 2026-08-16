@@ -452,24 +452,30 @@ def _unlink_owned_entry(path: Path, identity) -> None:
         path.unlink()
 
 
+def _rmdir_owned_entry(path: Path, identity) -> None:
+    if _same_entry(path, identity):
+        try:
+            path.rmdir()
+        except OSError:
+            pass
+
+
 def _write_staged_file(output_dir: Path, prefix: str, text: str):
     descriptor, raw_path = tempfile.mkstemp(prefix=prefix, dir=output_dir)
+    identity = os.fstat(descriptor)
     path = Path(raw_path)
     try:
         with os.fdopen(descriptor, 'w', encoding='utf-8') as stream:
             stream.write(text)
             stream.flush()
             os.fsync(stream.fileno())
-        return path, os.lstat(path)
+        return path, identity
     except BaseException:
         try:
             os.close(descriptor)
         except OSError:
             pass
-        try:
-            path.unlink()
-        except FileNotFoundError:
-            pass
+        _unlink_owned_entry(path, identity)
         raise
 
 
@@ -480,12 +486,12 @@ def _write_report_directory(output_dir: Path, summary: Mapping) -> None:
     markdown_text = _markdown(summary)
     output_dir = Path(os.path.abspath(output_dir))
     existed = _validate_output_directory(output_dir)
-    created_dir = False
+    created_identity = None
     if not existed:
         output_dir.parent.mkdir(parents=True, exist_ok=True)
         try:
             output_dir.mkdir()
-            created_dir = True
+            created_identity = os.lstat(output_dir)
         except FileExistsError:
             _validate_output_directory(output_dir)
 
@@ -530,11 +536,8 @@ def _write_report_directory(output_dir: Path, summary: Mapping) -> None:
             _unlink_owned_entry(path, identity)
         if lock_identity is not None:
             _unlink_owned_entry(lock_path, lock_identity)
-        if created_dir:
-            try:
-                output_dir.rmdir()
-            except OSError:
-                pass
+        if created_identity is not None:
+            _rmdir_owned_entry(output_dir, created_identity)
 
 
 def report(evidence_paths: Sequence[Path], output_dir: Path):
