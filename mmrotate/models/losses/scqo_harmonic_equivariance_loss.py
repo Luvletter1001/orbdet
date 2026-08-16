@@ -120,7 +120,7 @@ class SCQOHarmonicEquivarianceLoss(torch.nn.Module):
     def forward(self,
                 reference: Tensor,
                 view: Tensor,
-                action: Tensor,
+                transform: Tensor,
                 weight: Optional[Tensor] = None,
                 reduction_override: Optional[str] = None) -> Tensor:
         """Compute a bounded equivariance discrepancy in ``[0, 2]``."""
@@ -128,16 +128,9 @@ class SCQOHarmonicEquivarianceLoss(torch.nn.Module):
         _validate_vector(view, 'view')
         if reference.shape != view.shape:
             raise ValueError('reference and view must have the same shape')
-        if not isinstance(action, Tensor):
-            raise ValueError('action must be a Tensor')
-        if action.ndim < 2 or action.shape[-2:] != (2, 2):
-            raise ValueError('action must have shape [..., 2, 2]')
+        action = induced_harmonic_action(transform, self.order)
         if action.shape[:-2] != reference.shape[:-1]:
             raise ValueError('action batch shape must match vector batch shape')
-        if not action.is_floating_point():
-            raise ValueError('action must have a floating-point dtype')
-        if not torch.isfinite(action).all():
-            raise ValueError('action must contain only finite values')
         if reduction_override not in (None, 'none', 'mean', 'sum'):
             raise ValueError('invalid reduction_override')
 

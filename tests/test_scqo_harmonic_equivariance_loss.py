@@ -47,9 +47,9 @@ def test_equivariance_loss_is_zero_for_correct_views_and_differentiable():
     views = torch.einsum('bij,j->bi', actions, q_ref)
     loss_fn = SCQOHarmonicEquivarianceLoss(order=2)
 
-    correct_loss = loss_fn(q_ref.expand_as(views), views, actions)
+    correct_loss = loss_fn(q_ref.expand_as(views), views, transforms)
     incorrect_loss = loss_fn(q_ref.expand_as(views),
-                             q_ref.expand_as(views), actions)
+                             q_ref.expand_as(views), transforms)
 
     assert float(correct_loss) <= 1e-6
     assert float(incorrect_loss) > 0.1
@@ -78,8 +78,9 @@ def test_float16_inputs_are_promoted_to_float32():
 
     q_ref = torch.tensor([1.0, 0.0], dtype=torch.float16)
     q_view = torch.tensor([1.0, 0.0], dtype=torch.float16)
-    action = induced_harmonic_action(torch.eye(2, dtype=torch.float16), 4)
-    loss = SCQOHarmonicEquivarianceLoss(order=4)(q_ref, q_view, action)
+    transform = torch.eye(2, dtype=torch.float16)
+    action = induced_harmonic_action(transform, 4)
+    loss = SCQOHarmonicEquivarianceLoss(order=4)(q_ref, q_view, transform)
 
     assert action.dtype == torch.float32
     assert loss.dtype == torch.float32
@@ -112,3 +113,6 @@ def test_registry_builds_loss_and_rejects_non_orthogonal_transform():
     assert loss.order == 4
     with pytest.raises(ValueError, match='orthogonal'):
         induced_harmonic_action(torch.tensor([[1.0, 1.0], [0.0, 1.0]]), 2)
+    with pytest.raises(ValueError, match='orthogonal'):
+        loss(torch.tensor([1.0, 0.0]), torch.tensor([1.0, 0.0]),
+             torch.tensor([[1.0, 1.0], [0.0, 1.0]]))
