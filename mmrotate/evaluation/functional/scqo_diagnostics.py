@@ -2,7 +2,7 @@
 import hashlib
 import math
 import operator
-from numbers import Real
+from numbers import Integral, Real
 from typing import Dict, Sequence, Tuple
 
 import numpy as np
@@ -51,12 +51,24 @@ def periodic_angle_error(prediction: Tensor,
     period = _finite_real(period, 'period')
     if period <= 0:
         raise ValueError('period must be positive and finite')
+    period_in_dtype = torch.tensor(
+        period, dtype=prediction.dtype, device=prediction.device)
+    if (not torch.isfinite(period_in_dtype) or period_in_dtype.item() <= 0):
+        raise ValueError(
+            'period must be positive, finite, and representable in input dtype'
+        )
     if (not torch.isfinite(prediction).all()
             or not torch.isfinite(target).all()):
         raise ValueError('prediction and target must be finite')
 
-    delta = prediction - target
-    return torch.remainder(delta + period / 2, period).sub(period / 2).abs()
+    reduced_prediction = torch.remainder(prediction.double(), period)
+    reduced_target = torch.remainder(target.double(), period)
+    direct_error = (reduced_prediction - reduced_target).abs()
+    wrapped_error = (period - direct_error).clamp_min(0.0)
+    error = torch.minimum(direct_error, wrapped_error).to(prediction.dtype)
+    if not torch.isfinite(error).all():
+        raise RuntimeError('periodic angle error must be finite')
+    return error
 
 
 def _validate_matching_inputs(pred_boxes: Tensor, pred_scores: Tensor,
@@ -95,6 +107,14 @@ def _validate_matching_inputs(pred_boxes: Tensor, pred_scores: Tensor,
             or not torch.isfinite(pred_scores).all()
             or not torch.isfinite(gt_boxes).all()):
         raise ValueError('boxes and scores must be finite')
+    if ((pred_boxes[:, 2:4] <= 0).any() or (gt_boxes[:, 2:4] <= 0).any()):
+        raise ValueError('box widths and heights must be positive')
+    float32_dimensions = torch.cat(
+        (pred_boxes[:, 2:4], gt_boxes[:, 2:4])).float()
+    if (not torch.isfinite(float32_dimensions).all()
+            or (float32_dimensions <= 0).any()):
+        raise ValueError(
+            'box dimensions must remain positive and finite in float32')
 
 
 def _empty_matches(device: torch.device) -> Dict[str, Tensor]:
@@ -102,6 +122,25 @@ def _empty_matches(device: torch.device) -> Dict[str, Tensor]:
         gt_index=torch.empty(0, device=device, dtype=torch.long),
         pred_index=torch.empty(0, device=device, dtype=torch.long),
         iou=torch.empty(0, device=device, dtype=torch.float32))
+
+
+def _relative_float32_boxes(pred_box: Tensor,
+                            candidate_boxes: Tensor) -> Tuple[Tensor, Tensor]:
+    relative_pred = pred_box.detach().to(dtype=torch.float64).clone()
+    relative_candidates = candidate_boxes.detach().to(
+        dtype=torch.float64).clone()
+    origin = relative_pred[:, :2].clone()
+    relative_pred[:, :2] -= origin
+    relative_candidates[:, :2] -= origin
+    if (not torch.isfinite(relative_pred).all()
+            or not torch.isfinite(relative_candidates).all()):
+        raise ValueError('relative box geometry must be finite in float64')
+    relative_pred = relative_pred.float()
+    relative_candidates = relative_candidates.float()
+    if (not torch.isfinite(relative_pred).all()
+            or not torch.isfinite(relative_candidates).all()):
+        raise ValueError('relative box geometry must be finite in float32')
+    return relative_pred, relative_candidates
 
 
 def match_rotated_predictions(pred_boxes: Tensor,
@@ -145,9 +184,11 @@ def match_rotated_predictions(pred_boxes: Tensor,
                       & available_gt).nonzero(as_tuple=False).reshape(-1)
         if candidates.numel() == 0:
             continue
-        overlaps = rbbox_overlaps(
-            pred_boxes[pred_index:pred_index + 1].float(),
-            gt_boxes[candidates].float())[0]
+        relative_pred, relative_gt = _relative_float32_boxes(
+            pred_boxes[pred_index:pred_index + 1], gt_boxes[candidates])
+        overlaps = rbbox_overlaps(relative_pred, relative_gt)[0]
+        if not torch.isfinite(overlaps).all():
+            raise ValueError('rotated IoU values must be finite')
         best_value, best_offset = overlaps.max(dim=0)
         if best_value.item() < iou_threshold:
             continue
@@ -248,9 +289,56 @@ def expected_calibration_error(target, probability, bins=10) -> float:
     return float(value)
 
 
-def _fold_for_group(group, folds: int) -> int:
-    digest = hashlib.sha256(str(group).encode('utf-8')).digest()
+def _canonical_group_key(group) -> Tuple:
+    if isinstance(group, (bool, np.bool_)):
+        raise ValueError('groups must contain stable finite scalar IDs')
+    if isinstance(group, (str, np.str_)):
+        return ('string', str(group))
+    if isinstance(group, Integral):
+        return ('number', int(group), 1)
+    if isinstance(group, Real):
+        try:
+            numerator, denominator = group.as_integer_ratio()
+        except (AttributeError, OverflowError, ValueError) as error:
+            raise ValueError(
+                'groups must contain stable finite scalar IDs') from error
+        numerator = int(numerator)
+        denominator = int(denominator)
+        if denominator == 0:
+            raise ValueError('groups must contain stable finite scalar IDs')
+        if denominator < 0:
+            numerator = -numerator
+            denominator = -denominator
+        divisor = math.gcd(numerator, denominator)
+        return ('number', numerator // divisor, denominator // divisor)
+    raise ValueError('groups must contain stable finite scalar IDs')
+
+
+def _fold_for_key(key: Tuple, folds: int) -> int:
+    if key[0] == 'string':
+        payload = b'string:' + key[1].encode('utf-8')
+    else:
+        payload = f'number:{key[1]}/{key[2]}'.encode('ascii')
+    digest = hashlib.sha256(payload).digest()
     return int.from_bytes(digest[:8], 'big') % folds
+
+
+def _fold_for_group(group, folds: int) -> int:
+    return _fold_for_key(_canonical_group_key(group), folds)
+
+
+def _group_fold_assignments(groups: Sequence, folds: int) -> np.ndarray:
+    groups = np.asarray(groups, dtype=object)
+    if groups.ndim != 1:
+        raise ValueError('groups must have shape [N]')
+    assignments = np.empty(groups.size, dtype=np.int64)
+    fold_by_group = {}
+    for index, group in enumerate(groups):
+        key = _canonical_group_key(group)
+        if key not in fold_by_group:
+            fold_by_group[key] = _fold_for_key(key, folds)
+        assignments[index] = fold_by_group[key]
+    return assignments
 
 
 def _probe_arrays(
@@ -258,7 +346,7 @@ def _probe_arrays(
         groups: Sequence) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     raw_features = np.asarray(features)
     raw_target = np.asarray(target).reshape(-1)
-    groups = np.asarray(groups)
+    groups = np.asarray(groups, dtype=object)
     if (raw_features.ndim != 2 or raw_features.shape[0] != raw_target.size
             or raw_features.shape[0] == 0 or raw_features.shape[1] == 0):
         raise ValueError('features must have non-empty shape [N, D]')
@@ -279,13 +367,6 @@ def _probe_arrays(
     target = raw_target.astype(np.int64, copy=False)
     if np.unique(target).size != 2:
         raise ValueError('both binary classes are required')
-    if np.issubdtype(groups.dtype, np.number):
-        try:
-            if not np.isfinite(groups).all():
-                raise ValueError('groups must be finite')
-        except TypeError as error:
-            raise ValueError(
-                'groups must contain stable scalar IDs') from error
     return features, target, groups
 
 
@@ -303,8 +384,7 @@ def cross_validated_logistic_probe(features,
     max_iter = _positive_integer(max_iter, 'max_iter')
     features, target, groups = _probe_arrays(features, target, groups)
 
-    assignments = np.array([_fold_for_group(item, folds) for item in groups],
-                           dtype=np.int64)
+    assignments = _group_fold_assignments(groups, folds)
     probability = np.full(target.size, np.nan, dtype=np.float64)
     for fold in range(folds):
         test = assignments == fold

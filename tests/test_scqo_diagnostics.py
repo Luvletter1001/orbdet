@@ -1,9 +1,14 @@
+import json
 import math
+import os
+import subprocess
+import sys
 
 import numpy as np
 import pytest
 import torch
 
+from mmrotate.evaluation.functional import scqo_diagnostics as diagnostics
 from mmrotate.evaluation.functional.scqo_diagnostics import (
     binary_average_precision, binary_auroc, cross_validated_logistic_probe,
     expected_calibration_error, match_rotated_predictions,
@@ -48,6 +53,26 @@ def test_periodic_angle_error_rejects_misaligned_or_nonfinite_inputs():
             torch.zeros(1, dtype=torch.long), torch.zeros(1, dtype=torch.long))
     with pytest.raises(ValueError, match='finite'):
         periodic_angle_error(torch.tensor([math.nan]), torch.zeros(1))
+
+
+def test_periodic_angle_error_rejects_period_unrepresentable_in_input_dtype():
+    values = torch.zeros(1, dtype=torch.float32)
+
+    with pytest.raises(ValueError, match='representable'):
+        periodic_angle_error(values, values, period=1e-300)
+
+
+def test_periodic_angle_error_avoids_overflow_between_finite_extremes():
+    maximum = torch.finfo(torch.float32).max
+    pred = torch.tensor([maximum, -maximum])
+    target = torch.tensor([-maximum, maximum])
+
+    error = periodic_angle_error(pred, target)
+
+    assert error.dtype == pred.dtype
+    assert torch.isfinite(error).all()
+    assert (error >= 0).all()
+    assert (error <= math.pi / 2).all()
 
 
 def test_matching_is_score_ordered_one_to_one_and_class_aware():
@@ -98,6 +123,49 @@ def test_matching_supports_aligned_float64_boxes_with_float32_iou_output():
     assert torch.equal(result['pred_index'], torch.tensor([0]))
     assert result['iou'].dtype == torch.float32
     assert result['iou'].item() == pytest.approx(1.0)
+
+
+def test_matching_preserves_small_float64_offsets_at_large_centers():
+    pred = torch.tensor([[1e6, 1e6, 0.01, 0.01, 0.0]], dtype=torch.float64)
+    gt = torch.tensor([[1e6 + 0.02, 1e6, 0.01, 0.01, 0.0]],
+                      dtype=torch.float64)
+
+    result = match_rotated_predictions(
+        pred, torch.tensor([0.9], dtype=torch.float64), torch.tensor([0]), gt,
+        torch.tensor([0]))
+
+    assert result['pred_index'].numel() == 0
+    assert result['gt_index'].numel() == 0
+    assert result['iou'].numel() == 0
+
+
+@pytest.mark.parametrize(('width', 'height'), [(0.0, 1.0), (1.0, -1.0)])
+def test_matching_rejects_nonpositive_box_dimensions(width, height):
+    box = torch.tensor([[0.0, 0.0, width, height, 0.0]])
+
+    with pytest.raises(ValueError, match='positive'):
+        match_rotated_predictions(box, torch.tensor([0.9]), torch.tensor([0]),
+                                  box.clone(), torch.tensor([0]))
+
+
+def test_matching_rejects_dimensions_that_underflow_in_float32_iou():
+    box = torch.tensor([[0.0, 0.0, 1e-300, 1e-300, 0.0]], dtype=torch.float64)
+
+    with pytest.raises(ValueError, match='float32'):
+        match_rotated_predictions(box, torch.tensor([0.9],
+                                                    dtype=torch.float64),
+                                  torch.tensor([0]), box.clone(),
+                                  torch.tensor([0]))
+
+
+def test_matching_rejects_relative_offsets_that_overflow_float64():
+    pred = torch.tensor([[-1e308, 0.0, 1.0, 1.0, 0.0]], dtype=torch.float64)
+    gt = torch.tensor([[1e308, 0.0, 1.0, 1.0, 0.0]], dtype=torch.float64)
+
+    with pytest.raises(ValueError, match='relative'):
+        match_rotated_predictions(pred, torch.tensor([0.9],
+                                                     dtype=torch.float64),
+                                  torch.tensor([0]), gt, torch.tensor([0]))
 
 
 @pytest.mark.parametrize('empty_side', ['prediction', 'ground_truth', 'both'])
@@ -243,6 +311,77 @@ def test_grouped_probe_handles_constant_features_and_zero_mad():
 
     assert np.all(np.isfinite(probability))
     assert np.allclose(probability, 0.5)
+
+
+def test_group_fold_assignments_use_canonical_identity_and_hash_once(
+        monkeypatch):
+    real_sha256 = diagnostics.hashlib.sha256
+    hashed_payloads = []
+
+    def counting_sha256(payload):
+        hashed_payloads.append(payload)
+        return real_sha256(payload)
+
+    monkeypatch.setattr(diagnostics.hashlib, 'sha256', counting_sha256)
+    groups = [0.0, -0.0, 1, 1.0, '1', '1']
+
+    assignments = diagnostics._group_fold_assignments(groups, folds=17)
+
+    assert assignments[0] == assignments[1]
+    assert assignments[2] == assignments[3]
+    assert assignments[4] == assignments[5]
+    assert len(hashed_payloads) == 3
+    assert len(set(hashed_payloads)) == 3
+
+
+def test_probe_arrays_preserve_mixed_group_id_types():
+    features = np.arange(8, dtype=np.float64).reshape(4, 2)
+    target = np.array([0, 1, 0, 1])
+
+    _, _, groups = diagnostics._probe_arrays(features, target,
+                                             [1, '1', 2, '2'])
+
+    assert groups.dtype == object
+    assert isinstance(groups[0], int)
+    assert isinstance(groups[1], str)
+
+
+@pytest.mark.parametrize('group', [
+    True,
+    np.bool_(False), b'group', None,
+    object(), math.nan, math.inf, -math.inf
+])
+def test_group_hash_rejects_unstable_or_nonfinite_ids(group):
+    with pytest.raises(ValueError, match='stable finite scalar'):
+        diagnostics._fold_for_group(group, folds=3)
+
+
+def test_group_fold_assignments_are_stable_across_python_hash_seeds():
+    script = (
+        'import json; '
+        'from mmrotate.evaluation.functional.scqo_diagnostics import '
+        '_group_fold_assignments; '
+        'values = [0.0, -0.0, 1, 1.0, "1", "1"]; '
+        'print(json.dumps(_group_fold_assignments(values, 2**63-1).tolist()))')
+    outputs = []
+    for seed in ('1', '777'):
+        env = os.environ.copy()
+        env.update(
+            CUDA_VISIBLE_DEVICES='',
+            PYTHONDONTWRITEBYTECODE='1',
+            PYTHONHASHSEED=seed,
+            PYTHONNOUSERSITE='1')
+        output = subprocess.check_output([sys.executable, '-c', script],
+                                         env=env,
+                                         text=True)
+        outputs.append(json.loads(output))
+
+    assert outputs[0] == outputs[1]
+    assignments = outputs[0]
+    assert assignments[0] == assignments[1]
+    assert assignments[2] == assignments[3]
+    assert assignments[4] == assignments[5]
+    assert assignments[2] != assignments[4]
 
 
 @pytest.mark.parametrize(('parameter', 'value'), [('folds', 1), ('folds', 2.5),
