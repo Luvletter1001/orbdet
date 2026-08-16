@@ -2,8 +2,9 @@
 
 ## 当前状态
 
-`run_status=running`。控制器于 2026-08-16 04:20:05 启动，官方审计与 smoke
-均已通过，3E stage 1 于 04:39:47 开始。完整 12E 尚未完成。
+`run_status=complete_authorized_stage`。控制器于 2026-08-16 04:20:05 启动，
+官方审计与 smoke 均通过；3E stage 1 于 04:39:47 开始、09:05:00 完成，
+有界后评测于 09:26:19 完成。完整 12E 尚未完成。
 
 | field | value |
 |---|---|
@@ -22,10 +23,12 @@
 | steps_per_epoch | 17,082 |
 | seed | 3407 |
 | hard_timeout | `335m` |
-| expected_finish | about 09:05 CST |
-| latest_observed | epoch 3, global step 34,224 at 07:36 |
-| latest_loss | `1.2705` |
-| latest_grad_norm | `3.9720` |
+| stage_completed_at | `2026-08-16 09:05:00 +08:00` |
+| posteval_completed_at | `2026-08-16 09:26:19 +08:00` |
+| final_checkpoint_iter | 51,246 |
+| final_logged_step | 51,244 |
+| final_logged_loss | `1.0825` |
+| final_logged_grad_norm | `3.6446` |
 
 ## 前置门禁证据
 
@@ -43,6 +46,8 @@
   `work_dirs/controllers/orbdet_v0_2_dota1_ms_rr_gpu4567_six_hour_20260816/controller.log`
 - stage work dir：
   `work_dirs/formal/orbdet_v0_2_r50_dota1_ms_rr_gpu4567_seed3407_stage1_3e_20260816/`
+- post-eval root：
+  `work_dirs/eval/orbdet_v0_2_dota1_ms_rr_gpu4567_stage1_epoch3_20260816/`
 - smoke checkpoint：
   `work_dirs/smoke/orbdet_v0_2_r50_dota1_ms_rr_1x_gpu4567_20260816/epoch_1.pth`
 
@@ -95,8 +100,48 @@ epoch 2 同样记录 854 个 logger points，所有 loss/grad/time 均有限。�
 `q_joint=0.8280`、`q_high_frac=0.8356`、`hbox_fidelity=0.7693`。训练随后
 自动进入最终 epoch 3。
 
+## Epoch 3 与训练终态
+
+`epoch_3.pth` 于 09:05:00 完整生成，大小 398,382,889 bytes。真实反序列化
+验证为 epoch 3、iter 51,246、371 state tensors，嵌入配置含
+`OrbdetV02Detector` 与 `trainval_ms_full`，SHA256 为
+`7847a8991984a87ae1545a1a04f26490bcfe16213603615c24a19a299740996b`。
+
+三轮各记录 854 个 logger points，共 2,562 点，所有核心标量均有限。从首
+2,000 optimizer steps 到最后 100 个记录点，median loss 为
+`2.3652 -> 1.2010`，median grad norm 为 `12.2727 -> 3.3387`，median
+symmetry loss 为 `0.3355 -> 0.0320`，median `q_joint` 为
+`0.3542 -> 0.9683`。epoch 1/2/3 的 median loss 分别为 `1.4546`、
+`1.2355`、`1.1730`，说明 3E 末仍在收敛，但不能据此外推在线 AP。
+
+## Epoch 3 阶段评测
+
+09:05 在 checkpoint 强门禁通过后依次完成三项评测，09:26:19 写出总
+`COMPLETE`：
+
+- trainval 20,995 patches：`mAP=0.6851`、`AP50=0.6850`。这是训练集诊断，
+  不是 held-out 结果；同链路官方 checkpoint 为 `0.8131`，当前 3E 阶段低
+  `0.1280`，因此不能声称达到 80+。
+- 每类 AP：plane `0.895`、baseball-diamond `0.593`、bridge `0.435`、
+  ground-track-field `0.571`、small-vehicle `0.740`、large-vehicle `0.766`、
+  ship `0.798`、tennis-court `0.899`、basketball-court `0.723`、
+  storage-tank `0.671`、soccer-ball-field `0.502`、roundabout `0.659`、
+  harbor `0.619`、swimming-pool `0.740`、helicopter `0.663`。
+- SS ZIP：17,377,563 bytes，根目录 15 个唯一 `Task1_*.txt`，CRC 正常，
+  SHA256 `d513f4bf9a69e126edb6c19946a11df860d8c59037c802ca10e2bd0b314ab4b8`。
+- MS+RR ZIP：35,980,142 bytes，根目录 15 个唯一 `Task1_*.txt`，CRC 正常，
+  SHA256 `2768857944a36f27d9b5816de53c0d30141533bdc4e46e0ca7ea42abce3a85af`。
+
+SS 与 MS+RR ZIP 分别位于：
+
+- `work_dirs/eval/orbdet_v0_2_dota1_ms_rr_gpu4567_stage1_epoch3_20260816/ss_submission/orbdet_v0_2_msrr_stage1_epoch3_ss_task1/orbdet_v0_2_msrr_stage1_epoch3_ss_task1.zip`
+- `work_dirs/eval/orbdet_v0_2_dota1_ms_rr_gpu4567_stage1_epoch3_20260816/ms_submission/orbdet_v0_2_msrr_stage1_epoch3_msrr_task1/orbdet_v0_2_msrr_stage1_epoch3_msrr_task1.zip`
+
+最终审计未发现 Traceback、RuntimeError、NCCL error、OOM、NaN 或 Inf；无
+Orbdet 训练/推理残留进程，GPU 4–7 已释放。未启动 epoch 4，也未推送远端。
+
 ## 解释边界
 
-本轮 3E 只是可续训阶段，不是完整 12E 结果，不能用于最终在线 AP 结论。若控制器
-提前触发硬截止，只报告最近完整 epoch checkpoint；不自动 resume，不启动 R50
-36E，也不自动转入 Swin-B。
+本轮 3E 只是可续训阶段，不是完整 12E 结果，不能用于最终在线 AP 结论。下一次
+获得明确训练授权后，应从已验证的 `epoch_3.pth` 续训到 12E，而不是重跑前 3E；
+本轮不自动 resume，不启动 R50 36E，也不自动转入 Swin-B。

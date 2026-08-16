@@ -1,12 +1,12 @@
 ---
-formal_train_status: running
-formal_train_stage: dota1_msrr_gpu4567_stage1_3e
+formal_train_status: complete
+formal_train_stage: dota1_msrr_gpu4567_stage1_3e_complete
 user_explicit_authorization_required: satisfied
 authorized_scope: orbdet_v0.2_hrsc_clean_gpu89
 authorized_additional_scope: orbdet_tasks_1_2_3_gpu89
 authorized_gpus: 8,9
 authorized_at: 2026-08-15T03:20:00+08:00
-completed_at: 2026-08-15T12:45:31+08:00
+completed_at: 2026-08-16T09:26:19+08:00
 baseline_seed3407_status: complete_epoch103
 baseline_seed3407_best_epoch: 48
 baseline_seed3407_best_val_mAP: 0.9029
@@ -27,12 +27,21 @@ dota_v1_formal_status: complete_epoch12
 held_out_test_policy: not_run
 dota1_msrr_gpu4567_audit_status: complete
 dota1_msrr_gpu4567_smoke_status: complete_2_steps
-dota1_msrr_gpu4567_stage1_status: running_epoch3_epoch2_verified
+dota1_msrr_gpu4567_stage1_status: complete_epoch3_verified
 dota1_msrr_gpu4567_epoch1_checkpoint_bytes: 389144617
 dota1_msrr_gpu4567_epoch1_checkpoint_sha256: 025ef114f7aaf0d9c65ef97547401bd5424c28b9cd7a6cba9344de9ee2115f94
 dota1_msrr_gpu4567_epoch2_checkpoint_bytes: 393763241
 dota1_msrr_gpu4567_epoch2_checkpoint_sha256: e3a07e758da448c03107070d61407887b5deed8ec8f9e4cdc135351deb13429e
-dota1_msrr_gpu4567_posteval_status: armed_waiting_for_epoch3
+dota1_msrr_gpu4567_epoch3_checkpoint_bytes: 398382889
+dota1_msrr_gpu4567_epoch3_checkpoint_sha256: 7847a8991984a87ae1545a1a04f26490bcfe16213603615c24a19a299740996b
+dota1_msrr_gpu4567_posteval_status: complete_trainval_ss_ms
+dota1_msrr_gpu4567_posteval_completed_at: 2026-08-16T09:26:19+08:00
+dota1_msrr_gpu4567_trainval_mAP: 0.6851
+dota1_msrr_gpu4567_trainval_AP50: 0.6850
+dota1_msrr_gpu4567_ss_zip_bytes: 17377563
+dota1_msrr_gpu4567_ss_zip_sha256: d513f4bf9a69e126edb6c19946a11df860d8c59037c802ca10e2bd0b314ab4b8
+dota1_msrr_gpu4567_ms_zip_bytes: 35980142
+dota1_msrr_gpu4567_ms_zip_sha256: 2768857944a36f27d9b5816de53c0d30141533bdc4e46e0ca7ea42abce3a85af
 dota1_msrr_gpu4567_posteval_deadline: 2026-08-16T09:50:00+08:00
 dota1_msrr_gpu4567_posteval_tmux: orbdet_msrr4567_stage3_posteval_20260816
 dota1_msrr_gpu4567_checkpoint_gate: epoch3_iter51246_state371_sha256
@@ -44,7 +53,7 @@ dota1_msrr_gpu4567_tmux: orbdet_msrr4567_6h_20260816
 v02_worktree: /data1/zcy/Orbdet/.worktrees/v02-stability
 godc_worktree: /data1/zcy/Orbdet/.worktrees/godc-integration
 dota_v1_worktree: /data1/zcy/Orbdet/.worktrees/dota-v1-formal
-updated_at: 2026-08-16T07:36:53+08:00
+updated_at: 2026-08-16T09:27:08+08:00
 ---
 
 # 正式训练状态
@@ -99,22 +108,28 @@ updated_at: 2026-08-16T07:36:53+08:00
 - 官方 SS/MS+RR checkpoint 审计已完成；SS trainval `mAP=0.8131`，两份
   submission ZIP 均通过 15 文件与压缩完整性检查。
 - 四 rank 两步 smoke 已完成并生成 `epoch_1.pth`。
-- stage 1 于 2026-08-16 04:39:47 启动；epoch 1 于 06:08:17 完整落盘并
-  通过 epoch=1、iter=17,082、371 tensors 与 SHA256 验证，当前已进入
-  epoch 2。epoch 2 于 07:36:24 完整落盘并通过 epoch=2、iter=34,164、
-  371 tensors 与 SHA256 验证，当前已进入最终 epoch 3。控制器硬截止约为
-  09:55。
-- 当前只计划在 epoch 3 完整结束且剩余至少 1,800 秒时运行 trainval/SS/MS
-  阶段评测；评测绝对截止为 09:50，不启动 epoch 4。
-- 有界 watcher 已于 04:55:21 启动，目前只轮询 stage `COMPLETE`，不占用 GPU。
-- `tmux_session=orbdet_msrr4567_6h_20260816`；完整 12E 状态仍为
-  `not_complete`，后续 resume 需要用户再次明确授权。
+- stage 1 于 2026-08-16 04:39:47 启动，epoch 1/2/3 分别于 06:08:17、
+  07:36:24、09:05:00 完整落盘；三个 checkpoint 均通过 epoch/iter、371
+  tensors、嵌入配置 token 与 SHA256 验证。`epoch_3.pth` 为 398,382,889
+  bytes，SHA256 为
+  `7847a8991984a87ae1545a1a04f26490bcfe16213603615c24a19a299740996b`。
+- 09:05 自动进入有界阶段评测，09:26:19 完成 trainval、SS 和 MS+RR。
+  trainval 诊断为 `mAP=0.6851`、`AP50=0.6850`；这是训练集自评，不是
+  held-out 或在线测试结果。
+- SS/MS 两份 ZIP 均为根目录 15 个 `Task1_*.txt`，CRC 完整。SHA256 分别为
+  `d513f4bf9a69e126edb6c19946a11df860d8c59037c802ca10e2bd0b314ab4b8`
+  和 `2768857944a36f27d9b5816de53c0d30141533bdc4e46e0ca7ea42abce3a85af`。
+- stage 1 与评测都在截止前完成，GPU 4–7 已释放；未启动 epoch 4。
+  完整 12E 状态仍为 `not_complete`，后续从 `epoch_3.pth` resume 需要用户
+  再次明确授权。
 
 ## 验收与安全
 
-- 三项正式控制器均正常写出 `COMPLETE` 与合同要求的最终 checkpoint。
+- 四项已授权正式任务均正常写出 `COMPLETE` 与合同要求的最终 checkpoint。
 - 最终控制器日志未发现 `Traceback`、`RuntimeError`、NCCL error 或 `NaN`。
 - DOTA 源数据保持只读；没有改写 annotation/image。
 - 没有终止或修改其他用户的 GPU 进程。
 - 详细结果记录：
   `resultmd/exp_orbdet_overnight_123_20260815/fres_orbdet_overnight_123_gpu89.md`。
+- GPU4567 六小时阶段记录：
+  `resultmd/exp_orbdet_v02_dota1_msrr_gpu4567_20260816/flog_orbdet_v02_dota1_msrr_gpu4567_stage1.md`。

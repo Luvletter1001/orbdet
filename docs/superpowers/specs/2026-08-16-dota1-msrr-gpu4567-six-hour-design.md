@@ -45,3 +45,14 @@ PID、重复 Orbdet 作业或覆盖既有 checkpoint。
   51,246、371 个 state tensors，且嵌入配置含 `OrbdetV02Detector` 与
   `trainval_ms_full`；验证证据包含 checkpoint SHA256。
 - 不改写 DOTA 源数据，不终止或共享其他用户 GPU 进程，不推送远端。
+
+## 实际完成
+
+- 3E stage 于 09:05:00 完成，最终 checkpoint 合同为 epoch 3、iter 51,246、
+  371 tensors，SHA256
+  `7847a8991984a87ae1545a1a04f26490bcfe16213603615c24a19a299740996b`。
+- trainval 诊断为 `mAP=0.6851`、`AP50=0.6850`；该值明确标记为训练集自评。
+- SS 与 MS+RR submission 均为根目录 15 个 Task1 文件且 CRC 正常，后评测于
+  09:26:19 完成。
+- 所有工作在硬截止前结束，未启动 epoch 4，GPU 4–7 已释放，完整 12E 仍为
+  `not_complete`。
