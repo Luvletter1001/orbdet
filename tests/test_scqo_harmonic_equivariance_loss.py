@@ -1,0 +1,114 @@
+import math
+
+import pytest
+import torch
+
+from mmrotate.registry import MODELS
+from mmrotate.utils import register_all_modules
+
+
+def _rotation(angle, *, dtype=torch.float32):
+    cosine = math.cos(angle)
+    sine = math.sin(angle)
+    return torch.tensor(
+        [[cosine, -sine], [sine, cosine]], dtype=dtype)
+
+
+@pytest.mark.parametrize('order', [2, 4])
+def test_induced_actions_match_harmonic_rotation_and_reflection(order):
+    from mmrotate.models.losses.scqo_harmonic_equivariance_loss import (
+        induced_harmonic_action,)
+
+    theta, phi = 0.31, 0.47
+    harmonic = torch.tensor(
+        [math.cos(order * theta), math.sin(order * theta)])
+    expected_rotation = torch.tensor([
+        math.cos(order * (theta + phi)), math.sin(order * (theta + phi))
+    ])
+    expected_reflection = torch.tensor([
+        math.cos(-order * theta), math.sin(-order * theta)
+    ])
+
+    rotated = induced_harmonic_action(_rotation(phi), order) @ harmonic
+    reflected = induced_harmonic_action(
+        torch.tensor([[1.0, 0.0], [0.0, -1.0]]), order) @ harmonic
+
+    assert torch.allclose(rotated, expected_rotation, atol=1e-6)
+    assert torch.allclose(reflected, expected_reflection, atol=1e-6)
+
+
+def test_equivariance_loss_is_zero_for_correct_views_and_differentiable():
+    from mmrotate.models.losses.scqo_harmonic_equivariance_loss import (
+        SCQOHarmonicEquivarianceLoss, induced_harmonic_action)
+
+    q_ref = torch.tensor([1.0, 0.0], requires_grad=True)
+    transforms = torch.stack([_rotation(0.37), _rotation(0.61)])
+    actions = induced_harmonic_action(transforms, order=2)
+    views = torch.einsum('bij,j->bi', actions, q_ref)
+    loss_fn = SCQOHarmonicEquivarianceLoss(order=2)
+
+    correct_loss = loss_fn(q_ref.expand_as(views), views, actions)
+    incorrect_loss = loss_fn(q_ref.expand_as(views),
+                             q_ref.expand_as(views), actions)
+
+    assert float(correct_loss) <= 1e-6
+    assert float(incorrect_loss) > 0.1
+    correct_loss.backward()
+    assert q_ref.grad is not None
+    assert torch.isfinite(q_ref.grad).all()
+
+
+def test_zero_carriers_have_finite_unit_loss_without_reduction():
+    from mmrotate.models.losses.scqo_harmonic_equivariance_loss import (
+        SCQOHarmonicEquivarianceLoss,)
+
+    loss_fn = SCQOHarmonicEquivarianceLoss(order=2, reduction='none')
+    zero = torch.zeros(3, 2)
+    identity = torch.eye(2).expand(3, -1, -1)
+
+    loss = loss_fn(zero, zero, identity)
+
+    assert torch.isfinite(loss).all()
+    assert torch.equal(loss, torch.ones(3))
+
+
+def test_float16_inputs_are_promoted_to_float32():
+    from mmrotate.models.losses.scqo_harmonic_equivariance_loss import (
+        SCQOHarmonicEquivarianceLoss, induced_harmonic_action)
+
+    q_ref = torch.tensor([1.0, 0.0], dtype=torch.float16)
+    q_view = torch.tensor([1.0, 0.0], dtype=torch.float16)
+    action = induced_harmonic_action(torch.eye(2, dtype=torch.float16), 4)
+    loss = SCQOHarmonicEquivarianceLoss(order=4)(q_ref, q_view, action)
+
+    assert action.dtype == torch.float32
+    assert loss.dtype == torch.float32
+    assert torch.isfinite(loss)
+
+
+@pytest.mark.parametrize('order', [2, 4])
+def test_decode_harmonic_angle_respects_quotient_period(order):
+    from mmrotate.models.losses.scqo_harmonic_equivariance_loss import (
+        decode_harmonic_angle,)
+
+    angles = torch.tensor([-1.2, -0.2, 0.7])
+    carriers = torch.stack(
+        [torch.cos(order * angles), torch.sin(order * angles)], dim=-1)
+    decoded = decode_harmonic_angle(carriers, order)
+    period = 2 * math.pi / order
+    wrapped_error = torch.remainder(decoded - angles + period / 2,
+                                  period) - period / 2
+
+    assert torch.allclose(wrapped_error, torch.zeros_like(angles), atol=1e-6)
+
+
+def test_registry_builds_loss_and_rejects_non_orthogonal_transform():
+    from mmrotate.models.losses.scqo_harmonic_equivariance_loss import (
+        induced_harmonic_action,)
+
+    register_all_modules()
+    loss = MODELS.build(dict(type='SCQOHarmonicEquivarianceLoss', order=4))
+
+    assert loss.order == 4
+    with pytest.raises(ValueError, match='orthogonal'):
+        induced_harmonic_action(torch.tensor([[1.0, 1.0], [0.0, 1.0]]), 2)
