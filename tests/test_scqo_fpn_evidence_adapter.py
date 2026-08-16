@@ -11,6 +11,49 @@ from mmrotate.structures import RotatedBoxes
 from mmrotate.utils import register_all_modules
 
 
+@MODELS.register_module()
+class SCQOContractAuditExtractor(torch.nn.Module):
+
+    def __init__(self, num_inputs=1):
+        super().__init__()
+        self.num_inputs = num_inputs
+
+    def forward(self, features, rois):
+        return features[0].new_zeros((rois.shape[0], 4, 14, 14))
+
+    def map_roi_levels(self, rois, num_levels):
+        return rois.new_zeros((rois.shape[0], ), dtype=torch.long)
+
+
+@MODELS.register_module()
+class SCQOHalfLevelAuditExtractor(torch.nn.Module):
+
+    def __init__(self):
+        super().__init__()
+        self.num_inputs = 2
+        self.finest_scale = 8
+
+    def map_roi_levels(self, rois, num_levels):
+        work_rois = rois.float()
+        scale = torch.sqrt((work_rois[:, 3] - work_rois[:, 1]) *
+                           (work_rois[:, 4] - work_rois[:, 2]))
+        target_levels = torch.floor(
+            torch.log2(scale / self.finest_scale + 1e-6))
+        return target_levels.clamp(min=0, max=num_levels - 1).long()
+
+    def forward(self, features, rois):
+        aligned_rois = rois.type_as(features[0])
+        target_levels = self.map_roi_levels(aligned_rois, len(features))
+        batch_index = aligned_rois[:, 0].long()
+        output = features[0].new_empty((rois.shape[0], 4, 14, 14))
+        for level, feature in enumerate(features):
+            indices = (target_levels == level).nonzero().reshape(-1)
+            if indices.numel():
+                output[indices] = feature.index_select(
+                    0, batch_index.index_select(0, indices))
+        return output
+
+
 def _instances(boxes, labels):
     value = InstanceData()
     value.bboxes = RotatedBoxes(
@@ -36,6 +79,19 @@ def _cfg(featmap_strides=(1, ), finest_scale=None):
             roi_size=14,
             channels=4,
             negative_seed=3407))
+
+
+def _contract_cfg(num_inputs=1):
+    cfg = _cfg()
+    cfg['roi_extractor'] = dict(
+        type='SCQOContractAuditExtractor', num_inputs=num_inputs)
+    return cfg
+
+
+def _half_level_cfg():
+    cfg = _cfg()
+    cfg['roi_extractor'] = dict(type='SCQOHalfLevelAuditExtractor')
+    return cfg
 
 
 def test_adapter_preserves_batch_instance_identity_and_square_boxes():
@@ -141,6 +197,37 @@ def test_adapter_rejects_nonpositive_minimum_box_size(min_box_size):
         MODELS.build(cfg)
 
 
+@pytest.mark.parametrize('min_box_size', [True, False])
+def test_adapter_rejects_boolean_minimum_box_size(min_box_size):
+    register_all_modules()
+    cfg = _cfg()
+    cfg['min_box_size'] = min_box_size
+
+    with pytest.raises((TypeError, ValueError), match='min_box_size'):
+        MODELS.build(cfg)
+
+
+@pytest.mark.parametrize('min_box_size', ['2', None, 2 + 0j,
+                                           torch.tensor(2.0)])
+def test_adapter_rejects_non_real_minimum_box_size(min_box_size):
+    register_all_modules()
+    cfg = _cfg()
+    cfg['min_box_size'] = min_box_size
+
+    with pytest.raises(TypeError, match='min_box_size'):
+        MODELS.build(cfg)
+
+
+@pytest.mark.parametrize('min_box_size', [math.nan, math.inf, -math.inf])
+def test_adapter_rejects_nonfinite_minimum_box_size(min_box_size):
+    register_all_modules()
+    cfg = _cfg()
+    cfg['min_box_size'] = min_box_size
+
+    with pytest.raises(ValueError, match='min_box_size'):
+        MODELS.build(cfg)
+
+
 def test_adapter_rejects_insufficient_features_or_unaligned_metadata():
     register_all_modules()
     module = MODELS.build(_cfg((1, 2)))
@@ -152,3 +239,124 @@ def test_adapter_rejects_insufficient_features_or_unaligned_metadata():
     with pytest.raises(ValueError, match='align'):
         module((torch.randn(1, 4, 16, 16),
                 torch.randn(1, 4, 8, 8)), instances, [])
+
+
+@pytest.mark.parametrize('batch_sizes', [(0, ), (2, ), (1, 0), (1, 2)])
+def test_adapter_rejects_consumed_feature_batch_mismatch(batch_sizes):
+    register_all_modules()
+    module = MODELS.build(_contract_cfg(len(batch_sizes)))
+    features = tuple(
+        torch.randn(batch_size, 4, 16 // (2**index), 16 // (2**index))
+        for index, batch_size in enumerate(batch_sizes))
+    instances = [_instances([[8, 8, 4, 4, 0]], [0])]
+
+    with pytest.raises(ValueError, match='batch'):
+        module(features, instances, [dict(img_shape=(16, 16))])
+
+
+@pytest.mark.parametrize('feature', [
+    torch.randn(1, 4, 16),
+    torch.tensor(1.0),
+])
+def test_adapter_rejects_feature_without_nchw_shape(feature):
+    register_all_modules()
+    module = MODELS.build(_contract_cfg())
+    instances = [_instances([[8, 8, 4, 4, 0]], [0])]
+
+    with pytest.raises(ValueError, match='four-dimensional'):
+        module((feature, ), instances, [dict(img_shape=(16, 16))])
+
+
+def test_adapter_ignores_unconsumed_extra_feature_batch_size():
+    register_all_modules()
+    module = MODELS.build(_contract_cfg())
+    features = (torch.randn(1, 4, 16, 16), torch.randn(3, 4, 8, 8))
+    instances = [_instances([[8, 8, 4, 4, 0]], [0])]
+
+    result = module(features, instances, [dict(img_shape=(16, 16))])
+
+    assert result['batch_index'].shape == (1, )
+
+
+@pytest.mark.parametrize('meta', [
+    pytest.param({}, id='missing'),
+    pytest.param(dict(img_shape=None), id='none'),
+    pytest.param(dict(img_shape=()), id='empty'),
+    pytest.param(dict(img_shape=(20, )), id='missing-width'),
+    pytest.param(dict(img_shape=(True, 20)), id='boolean-height'),
+    pytest.param(dict(img_shape=(20, False)), id='boolean-width'),
+    pytest.param(dict(img_shape=(0, 20)), id='zero-height'),
+    pytest.param(dict(img_shape=(20, -1)), id='negative-width'),
+    pytest.param(dict(img_shape=(math.nan, 20)), id='nan-height'),
+    pytest.param(dict(img_shape=(20, math.inf)), id='infinite-width'),
+    pytest.param(dict(img_shape=('20', 20)), id='non-real-height'),
+    pytest.param(dict(img_shape=(20, 2 + 0j)), id='non-real-width'),
+])
+def test_adapter_rejects_invalid_image_shape(meta):
+    register_all_modules()
+    module = MODELS.build(_contract_cfg())
+    instances = [_instances([[8, 8, 4, 4, 0]], [0])]
+
+    with pytest.raises(ValueError, match='img_shape'):
+        module((torch.randn(1, 4, 20, 20), ), instances, [meta])
+
+
+def test_adapter_validates_image_shape_even_without_instances():
+    register_all_modules()
+    module = MODELS.build(_contract_cfg())
+    instances = [_instances(torch.empty(0, 5),
+                            torch.empty(0, dtype=torch.long))]
+
+    with pytest.raises(ValueError, match='img_shape'):
+        module((torch.randn(1, 4, 20, 20), ), instances,
+               [dict(img_shape=(0, 20))])
+
+
+def test_adapter_accepts_positive_real_image_shape_with_extra_dimensions():
+    register_all_modules()
+    module = MODELS.build(_contract_cfg())
+    instances = [_instances([[8, 8, 4, 4, 0]], [0])]
+
+    result = module((torch.randn(1, 4, 20, 20), ), instances,
+                    [dict(img_shape=(20.5, 19.5, 3))])
+
+    assert result['support_fraction'].shape == (1, )
+
+
+def test_half_rois_align_actual_sampling_fpn_report_and_square_coordinates():
+    register_all_modules()
+    module = MODELS.build(_half_level_cfg())
+    features = (
+        torch.ones(1, 4, 14, 14, dtype=torch.float16),
+        torch.full((1, 4, 14, 14), 2.0, dtype=torch.float16),
+    )
+    instances = [_instances([[32, 32, 15.999, 15.999, 0]], [0])]
+
+    result = module(features, instances, [dict(img_shape=(64, 64))])
+
+    assert float(result['energy']) == 4.0
+    assert result['fpn_level'].item() == 1
+    assert torch.equal(result['square_hbox'],
+                       torch.tensor([[24.0, 24.0, 40.0, 40.0]]))
+    assert {value.device for value in result.values()} == {features[0].device}
+    assert {
+        value.dtype
+        for value in result.values() if value.is_floating_point()
+    } == {torch.float32}
+
+
+def test_half_empty_result_has_uniform_device_and_floating_dtype():
+    register_all_modules()
+    module = MODELS.build(_half_level_cfg())
+    features = (
+        torch.empty(0, 4, 14, 14, dtype=torch.float16),
+        torch.empty(0, 4, 14, 14, dtype=torch.float16),
+    )
+
+    result = module(features, [], [])
+
+    assert {value.device for value in result.values()} == {features[0].device}
+    assert {
+        value.dtype
+        for value in result.values() if value.is_floating_point()
+    } == {torch.float32}
