@@ -43,6 +43,31 @@ def _arguments(tmp_path, *, max_images=None):
         iou_threshold=0.5)
 
 
+def _frozen_hrsc_val_pipeline():
+    return [
+        dict(
+            type='mmdet.LoadImageFromFile',
+            file_client_args=dict(backend='disk')),
+        dict(
+            type='mmdet.FixShapeResize',
+            width=800,
+            height=800,
+            keep_ratio=True),
+        dict(type='mmdet.LoadAnnotations', with_bbox=True, box_type='qbox'),
+        dict(type='ConvertBoxType', box_type_mapping=dict(gt_bboxes='rbox')),
+        dict(
+            type='mmdet.PackDetInputs',
+            meta_keys=('img_id', 'img_path', 'ori_shape', 'img_shape',
+                       'scale_factor')),
+    ]
+
+
+def _config_with_val_pipeline(pipeline=None):
+    if pipeline is None:
+        pipeline = _frozen_hrsc_val_pipeline()
+    return dict(val_dataloader=dict(dataset=dict(pipeline=pipeline)))
+
+
 def _instances(boxes, labels, scores=None):
     instances = SimpleNamespace(
         bboxes=RotatedBoxes(
@@ -53,12 +78,19 @@ def _instances(boxes, labels, scores=None):
     return instances
 
 
-def _sample(image_id, gt_boxes, gt_labels, pred_boxes, pred_scores,
-            pred_labels):
+def _sample(image_id,
+            gt_boxes,
+            gt_labels,
+            pred_boxes,
+            pred_scores,
+            pred_labels,
+            *,
+            scale_factor=(1.0, 1.0)):
     prediction = SimpleNamespace(
         pred_instances=_instances(pred_boxes, pred_labels, pred_scores))
     return SimpleNamespace(
-        metainfo=dict(img_id=image_id, img_shape=(64, 64)),
+        metainfo=dict(
+            img_id=image_id, img_shape=(64, 64), scale_factor=scale_factor),
         gt_instances=_instances(gt_boxes, gt_labels),
         prediction=prediction)
 
@@ -72,6 +104,7 @@ class _FakeModel(torch.nn.Module):
         self.eval_called = False
         self.preprocessed_batch_sizes = []
         self.predicted_image_ids = []
+        self.predict_rescale = []
 
     def eval(self):
         self.eval_called = True
@@ -90,9 +123,10 @@ class _FakeModel(torch.nn.Module):
         return (inputs.float(), )
 
     def predict(self, inputs, samples, rescale=False):
-        assert rescale is False
+        assert rescale is True
         assert torch.is_inference_mode_enabled()
         assert inputs.shape[0] == len(samples)
+        self.predict_rescale.append(rescale)
         self.predicted_image_ids.extend(sample.metainfo['img_id']
                                         for sample in samples)
         return [sample.prediction for sample in samples]
@@ -106,8 +140,9 @@ class _BoxConvertingModel(_FakeModel):
         self.box_types_after_predict = None
 
     def predict(self, inputs, samples, rescale=False):
-        assert rescale is False
+        assert rescale is True
         assert torch.is_inference_mode_enabled()
+        self.predict_rescale.append(rescale)
         self.predicted_image_ids.extend(sample.metainfo['img_id']
                                         for sample in samples)
         predictions = BaseDetector.add_pred_to_datasample(
@@ -164,13 +199,22 @@ class _RotatedBoxContractEvidence(_FakeEvidence):
     def __init__(self):
         super().__init__()
         self.box_types = []
+        self.gt_instance_ids = []
+        self.box_object_ids = []
+        self.box_tensors = []
+        self.label_tensors = []
 
     def forward(self, features, gt_instances, metas):
+        self.gt_instance_ids.extend(
+            id(instances) for instances in gt_instances)
         self.box_types.extend(
             type(instances.bboxes) for instances in gt_instances)
         for instances in gt_instances:
             if not isinstance(instances.bboxes, RotatedBoxes):
                 raise TypeError('evidence adapter requires RotatedBoxes')
+            self.box_object_ids.append(id(instances.bboxes))
+            self.box_tensors.append(instances.bboxes.tensor.detach().clone())
+            self.label_tensors.append(instances.labels.detach().clone())
             instances.bboxes.convert_to('hbox')
         return super().forward(features, gt_instances, metas)
 
@@ -187,7 +231,12 @@ def _install_fake_runtime(monkeypatch,
         model = _FakeModel(fail_on_extract=fail_on_extract)
     if evidence is None:
         evidence = _FakeEvidence(on_forward=on_evidence)
-    cfg = SimpleNamespace(load_from='old.pth', resume=True, work_dir='old')
+    cfg = SimpleNamespace(
+        load_from='old.pth',
+        resume=True,
+        work_dir='old',
+        val_dataloader=SimpleNamespace(
+            dataset=SimpleNamespace(pipeline=_frozen_hrsc_val_pipeline())))
     runner = SimpleNamespace(
         model=model,
         val_dataloader=[
@@ -242,9 +291,10 @@ def _single_sample(image_id='img-0'):
                    [0.9], [0])
 
 
-def _real_box_sample():
+def _real_box_sample(*, scale_factor=(1.0, 1.0)):
     sample = DetDataSample()
-    sample.set_metainfo(dict(img_id='img-0', img_shape=(64, 64)))
+    sample.set_metainfo(
+        dict(img_id='img-0', img_shape=(64, 64), scale_factor=scale_factor))
     ground_truth = InstanceData()
     ground_truth.bboxes = RotatedBoxes(
         torch.tensor([[10.0, 10.0, 8.0, 4.0, 0.1]]))
@@ -321,6 +371,62 @@ def test_box_tensor_accepts_only_baseboxes_or_n_by_five_tensors():
         collector._box_tensor(torch.zeros((2, 4)))
     with pytest.raises(ValueError, match=r'\[N, 5\]'):
         collector._box_tensor(torch.zeros(5))
+
+
+@pytest.mark.parametrize('config_name', [
+    'configs/orbdet/orbdet_v0_2_r50_hrsc_clean_gpu89.py',
+    'configs/orbdet/orbdet_godc_c2_r50_hrsc_clean_gpu89.py',
+])
+def test_coordinate_contract_accepts_exact_frozen_hrsc_configs(config_name):
+    cfg = collector.Config.fromfile(ROOT / config_name)
+
+    collector._validate_hrsc_val_pipeline(cfg)
+
+
+def test_coordinate_contract_accepts_equivalent_config_like_dict():
+    collector._validate_hrsc_val_pipeline(_config_with_val_pipeline())
+
+
+def test_coordinate_contract_rejects_unsafe_pipeline_variants():
+    annotations_first = _frozen_hrsc_val_pipeline()
+    annotations_first[1], annotations_first[2] = (annotations_first[2],
+                                                  annotations_first[1])
+
+    later_geometry = _frozen_hrsc_val_pipeline()
+    later_geometry.insert(3, dict(type='mmdet.RandomFlip', prob=0.0))
+
+    missing_scale_factor = _frozen_hrsc_val_pipeline()
+    missing_scale_factor[-1] = dict(
+        type='mmdet.PackDetInputs',
+        meta_keys=('img_id', 'img_path', 'ori_shape', 'img_shape'))
+
+    wrong_resize_contract = _frozen_hrsc_val_pipeline()
+    wrong_resize_contract[1] = dict(
+        type='mmdet.FixShapeResize', width=800, height=800, keep_ratio=False)
+
+    for pipeline in (annotations_first, later_geometry, missing_scale_factor,
+                     wrong_resize_contract):
+        with pytest.raises(
+                ValueError, match='frozen HRSC validation pipeline'):
+            collector._validate_hrsc_val_pipeline(
+                _config_with_val_pipeline(pipeline))
+
+
+@pytest.mark.parametrize('value', [
+    None,
+    1.0,
+    [1.0],
+    [1.0, 1.0, 1.0],
+    [True, 1.0],
+    ['1.0', 1.0],
+    [math.nan, 1.0],
+    [math.inf, 1.0],
+    [0.0, 1.0],
+    [-1.0, 1.0],
+])
+def test_scale_factor_requires_two_finite_positive_numeric_components(value):
+    with pytest.raises(ValueError, match='scale_factor'):
+        collector._validated_scale_factor(value)
 
 
 @pytest.mark.parametrize('value', [
@@ -578,6 +684,57 @@ def test_collector_extracts_evidence_before_real_prediction_box_conversion(
     assert row['angle_error_deg'] == pytest.approx(math.degrees(0.1), abs=1e-5)
     assert row['angle_error_c4_deg'] == pytest.approx(
         math.degrees(0.1), abs=1e-5)
+    assert row['gt_width'] == 8.0
+    assert row['gt_height'] == 4.0
+    assert row['gt_area'] == 32.0
+    assert row['gt_aspect_ratio'] == 2.0
+
+
+def test_collector_scales_cloned_gt_only_for_evidence_and_matches_originals(
+        tmp_path, monkeypatch):
+    args = _arguments(tmp_path)
+    sample = _sample(
+        'img-0', [[10, 10, 8, 4, math.pi / 4], [30, 15, 6, 2, -0.2]], [0, 1],
+        [[10, 10, 8, 4, math.pi / 4], [30, 15, 6, 2, -0.2]], [0.9, 0.8],
+        [0, 1],
+        scale_factor=(2.0, 3.0))
+    original_gt = sample.gt_instances
+    original_boxes = original_gt.bboxes
+    original_labels = original_gt.labels
+    original_box_tensor = original_boxes.tensor.detach().clone()
+    original_label_tensor = original_labels.detach().clone()
+    evidence = _RotatedBoxContractEvidence()
+    runtime = _install_fake_runtime(monkeypatch, [sample], evidence=evidence)
+
+    manifest = collect(args)
+
+    rows = [json.loads(line) for line in args.output.read_text().splitlines()]
+    assert runtime['model'].predict_rescale == [True]
+    assert len(evidence.gt_instance_ids) == 1
+    assert evidence.gt_instance_ids[0] != id(original_gt)
+    assert evidence.box_object_ids[0] != id(original_boxes)
+    anisotropic_length_scale = math.sqrt(6.5)
+    torch.testing.assert_close(
+        evidence.box_tensors[0][0],
+        torch.tensor([
+            20.0, 30.0, 8.0 * anisotropic_length_scale,
+            4.0 * anisotropic_length_scale,
+            math.atan2(2.0, 3.0)
+        ]))
+    torch.testing.assert_close(evidence.label_tensors[0],
+                               original_label_tensor)
+    assert sample.gt_instances is original_gt
+    assert sample.gt_instances.bboxes is original_boxes
+    assert sample.gt_instances.labels is original_labels
+    torch.testing.assert_close(original_boxes.tensor, original_box_tensor)
+    torch.testing.assert_close(original_labels, original_label_tensor)
+    assert manifest['matched_count'] == 2
+    assert len(rows) == 2
+    row = rows[0]
+    assert row['matched'] is True
+    assert row['rotated_iou'] == pytest.approx(1.0)
+    assert row['gt_angle'] == pytest.approx(math.pi / 4)
+    assert row['pred_angle'] == pytest.approx(math.pi / 4)
     assert row['gt_width'] == 8.0
     assert row['gt_height'] == 4.0
     assert row['gt_area'] == 32.0

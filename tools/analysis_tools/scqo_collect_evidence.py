@@ -2,6 +2,7 @@
 """Collect per-instance SCQO evidence from a frozen checkpoint."""
 
 import argparse
+import copy
 import hashlib
 import json
 import math
@@ -37,6 +38,13 @@ _RESERVED_EVIDENCE_KEYS = _BASE_ROW_KEYS | _GEOMETRY_KEYS | _MATCH_KEYS
 _ADAPTER_IDENTITY_KEYS = {
     'batch_index', 'instance_index', 'label', 'square_hbox'
 }
+_FROZEN_HRSC_VAL_PIPELINE_TYPES = (
+    'mmdet.LoadImageFromFile',
+    'mmdet.FixShapeResize',
+    'mmdet.LoadAnnotations',
+    'ConvertBoxType',
+    'mmdet.PackDetInputs',
+)
 
 
 def sha256(path: Path) -> str:
@@ -76,6 +84,104 @@ def _box_tensor(boxes) -> torch.Tensor:
     if tensor.ndim != 2 or tensor.shape[1] != 5:
         raise ValueError('rotated boxes must have shape [N, 5]')
     return tensor
+
+
+def _config_field(value, key: str):
+    if isinstance(value, Mapping):
+        return value[key]
+    return getattr(value, key)
+
+
+def _validate_hrsc_val_pipeline(cfg) -> None:
+    """Require image-only resize before GT loading and no later geometry."""
+    message = (
+        'SCQO collection requires the frozen HRSC validation pipeline: '
+        'LoadImageFromFile -> FixShapeResize(800x800, keep_ratio=True) -> '
+        'LoadAnnotations(qbox) -> ConvertBoxType(rbox) -> PackDetInputs '
+        'with scale_factor metadata')
+    try:
+        val_dataloader = _config_field(cfg, 'val_dataloader')
+        dataset = _config_field(val_dataloader, 'dataset')
+        pipeline = _config_field(dataset, 'pipeline')
+        transforms = list(pipeline)
+        transform_types = tuple(
+            _config_field(transform, 'type') for transform in transforms)
+    except (AttributeError, KeyError, TypeError) as error:
+        raise ValueError(message) from error
+
+    if transform_types != _FROZEN_HRSC_VAL_PIPELINE_TYPES:
+        raise ValueError(message)
+    resize = transforms[1]
+    annotations = transforms[2]
+    convert = transforms[3]
+    packed = transforms[4]
+    try:
+        resize_matches = (
+            _config_field(resize, 'width') == 800
+            and _config_field(resize, 'height') == 800
+            and _config_field(resize, 'keep_ratio') is True)
+        annotations_match = (
+            _config_field(annotations, 'with_bbox') is True
+            and _config_field(annotations, 'box_type') == 'qbox')
+        convert_matches = (
+            _config_field(convert,
+                          'box_type_mapping') == dict(gt_bboxes='rbox'))
+        meta_keys = _config_field(packed, 'meta_keys')
+        pack_matches = ('scale_factor' in meta_keys)
+    except (AttributeError, KeyError, TypeError) as error:
+        raise ValueError(message) from error
+    if not (resize_matches and annotations_match and convert_matches
+            and pack_matches):
+        raise ValueError(message)
+
+
+def _validated_scale_factor(value) -> tuple:
+    """Return a finite positive ``(scale_x, scale_y)`` pair."""
+    message = 'scale_factor must contain two finite positive numeric values'
+    if value is None or isinstance(value, (str, bytes, Mapping)):
+        raise ValueError(message)
+    if isinstance(value, torch.Tensor):
+        if value.ndim != 1:
+            raise ValueError(message)
+        components = value.detach().cpu().tolist()
+    else:
+        try:
+            components = list(value)
+        except TypeError as error:
+            raise ValueError(message) from error
+    if len(components) != 2:
+        raise ValueError(message)
+    validated = []
+    for component in components:
+        if isinstance(component, torch.Tensor):
+            if component.numel() != 1:
+                raise ValueError(message)
+            component = component.item()
+        if isinstance(component, bool) or not isinstance(component, Real):
+            raise ValueError(message)
+        component = float(component)
+        if not math.isfinite(component) or component <= 0:
+            raise ValueError(message)
+        validated.append(component)
+    return tuple(validated)
+
+
+def _feature_space_gt_instances(samples):
+    """Clone original-space GT and rescale only the FPN-evidence view."""
+    feature_instances = []
+    for sample in samples:
+        original = sample.gt_instances
+        if not isinstance(original.bboxes, BaseBoxes):
+            raise TypeError(
+                'feature-space GT bboxes must be BaseBoxes before prediction')
+        scale_factor = _validated_scale_factor(
+            sample.metainfo.get('scale_factor'))
+        cloned = copy.deepcopy(original)
+        cloned_boxes = original.bboxes.clone()
+        cloned_boxes.rescale_(scale_factor)
+        cloned.bboxes = cloned_boxes
+        feature_instances.append(cloned)
+    return feature_instances
 
 
 def _validate_mapping_keys(values: Mapping, name: str) -> None:
@@ -362,11 +468,8 @@ def _write_rows(stream, runner, model, evidence_module, run_name: str,
                 samples = samples[:remaining]
             if not samples:
                 continue
-            features = model.extract_feat(inputs)
-            raw_evidence = evidence_module(
-                features, [sample.gt_instances for sample in samples],
-                [sample.metainfo for sample in samples])
-            evidence_by_image = _evidence_by_image(raw_evidence, samples)
+            # Prediction rescaling and every reported quantity use this
+            # immutable original-coordinate snapshot.
             gt_snapshots = [
                 dict(
                     image_id=str(sample.metainfo['img_id']),
@@ -375,7 +478,13 @@ def _write_rows(stream, runner, model, evidence_module, run_name: str,
                     labels=sample.gt_instances.labels.detach().clone())
                 for sample in samples
             ]
-            predictions = list(model.predict(inputs, samples, rescale=False))
+            feature_gt_instances = _feature_space_gt_instances(samples)
+            features = model.extract_feat(inputs)
+            raw_evidence = evidence_module(
+                features, feature_gt_instances,
+                [sample.metainfo for sample in samples])
+            evidence_by_image = _evidence_by_image(raw_evidence, samples)
+            predictions = list(model.predict(inputs, samples, rescale=True))
             if len(predictions) != len(samples):
                 raise ValueError('predictions and data samples must align')
 
@@ -493,6 +602,7 @@ def collect(args) -> Dict:
                 prefix='orbdet_scqo_runner_') as runner_workspace:
             register_all_modules()
             cfg = Config.fromfile(config_path)
+            _validate_hrsc_val_pipeline(cfg)
             cfg.load_from = None
             cfg.resume = False
             cfg.work_dir = runner_workspace
