@@ -1269,6 +1269,61 @@ def test_reporter_preserves_racing_directory_replacing_created_output(
     assert not list(output.iterdir())
 
 
+def test_reporter_preserves_racer_installed_before_created_identity_capture(
+        tmp_path, monkeypatch):
+    source = tmp_path / 'evidence.jsonl'
+    _write_jsonl(source, [_minimal_row()])
+    output = tmp_path / 'audit'
+    displaced = tmp_path / 'displaced-owned-directory'
+    real_mkdir = Path.mkdir
+    racer_identity = {}
+
+    def replace_immediately_after_mkdir(path, *args, **kwargs):
+        result = real_mkdir(path, *args, **kwargs)
+        if path == output and 'value' not in racer_identity:
+            path.rename(displaced)
+            real_mkdir(path)
+            racer_identity['value'] = os.lstat(path)
+        return result
+
+    def fail_lock_open(path, flags, mode=0o777, *, dir_fd=None):
+        assert Path(path) == output / '.scqo-report.lock'
+        raise OSError('synthetic post-mkdir failure')
+
+    monkeypatch.setattr(Path, 'mkdir', replace_immediately_after_mkdir)
+    monkeypatch.setattr(reporter.os, 'open', fail_lock_open)
+
+    with pytest.raises(OSError, match='synthetic post-mkdir failure'):
+        reporter.report([source], output)
+
+    assert output.is_dir()
+    current = os.lstat(output)
+    expected = racer_identity['value']
+    assert (current.st_dev, current.st_ino) == (expected.st_dev,
+                                                expected.st_ino)
+    assert displaced.is_dir()
+    assert not list(output.iterdir())
+
+
+def test_reporter_retains_created_empty_output_after_lock_failure(
+        tmp_path, monkeypatch):
+    source = tmp_path / 'evidence.jsonl'
+    _write_jsonl(source, [_minimal_row()])
+    output = tmp_path / 'audit'
+
+    def fail_lock_open(path, flags, mode=0o777, *, dir_fd=None):
+        assert Path(path) == output / '.scqo-report.lock'
+        raise OSError('synthetic lock failure')
+
+    monkeypatch.setattr(reporter.os, 'open', fail_lock_open)
+
+    with pytest.raises(OSError, match='synthetic lock failure'):
+        reporter.report([source], output)
+
+    assert output.is_dir()
+    assert not list(output.iterdir())
+
+
 def test_reporter_preserves_racing_temp_replacement_on_fsync_failure(
         tmp_path, monkeypatch):
     output = tmp_path / 'audit'
