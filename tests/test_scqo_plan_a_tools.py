@@ -998,8 +998,10 @@ def test_reporter_passes_image_identity_as_group_to_probe(monkeypatch):
 
 def test_exact_gate_b_thresholds():
     assert reporter._gate_b(0.65, 0.60, [0.51, 0.51, 0.51]) == 'PASS'
+    assert reporter._gate_b(0.70, 0.65, [0.51, 0.51, 0.51]) == 'PASS'
+    assert reporter._gate_b(0.85, 0.80, [0.51, 0.51, 0.51]) == 'PASS'
     assert reporter._gate_b(0.6499, 0.50, [0.51, 0.51, 0.51]) == 'FAIL'
-    assert reporter._gate_b(0.70, 0.6501, [0.51, 0.51, 0.51]) == 'FAIL'
+    assert reporter._gate_b(0.70, 0.650001, [0.51, 0.51, 0.51]) == 'FAIL'
     assert reporter._gate_b(0.70, 0.60, [0.50, 0.51, 0.51]) == 'FAIL'
     assert reporter._gate_b(0.70, 0.60, [None, 0.51, 0.51]) == 'INSUFFICIENT'
 
@@ -1064,24 +1066,71 @@ def test_reporter_marks_nonseparating_evidence_fail(monkeypatch):
     assert result['gate_b'] == 'FAIL'
 
 
-@pytest.mark.parametrize('destination_kind', ['file', 'directory', 'symlink'])
-def test_reporter_refuses_any_existing_output_entry(tmp_path,
-                                                    destination_kind):
+def test_reporter_cli_writes_into_existing_evidence_directory(tmp_path):
+    output = tmp_path / 'audit'
+    output.mkdir()
+    source = output / 'evidence.jsonl'
+    manifest = output / 'evidence.manifest.json'
+    unrelated = output / 'notes.txt'
+    _write_jsonl(source, [_minimal_row()])
+    manifest.write_text('{"immutable": true}\n', encoding='utf-8')
+    unrelated.write_text('preserve-me\n', encoding='utf-8')
+    evidence_bytes = source.read_bytes()
+    manifest_bytes = manifest.read_bytes()
+
+    completed = _run_reporter([source], output)
+
+    assert completed.returncode == 0, completed.stderr
+    assert source.read_bytes() == evidence_bytes
+    assert manifest.read_bytes() == manifest_bytes
+    assert unrelated.read_text(encoding='utf-8') == 'preserve-me\n'
+    assert (output / 'summary.json').is_file()
+    assert (output / 'fres_scqo_plan_a_hrsc_audit.md').is_file()
+
+
+@pytest.mark.parametrize('destination_kind',
+                         ['file', 'directory_symlink', 'dangling_symlink'])
+def test_reporter_refuses_file_or_symlink_output_path(tmp_path,
+                                                      destination_kind):
     source = tmp_path / 'rows.jsonl'
     _write_jsonl(source, [_minimal_row()])
     output = tmp_path / 'report'
     if destination_kind == 'file':
         output.write_text('keep-me\n', encoding='utf-8')
-    elif destination_kind == 'directory':
-        output.mkdir()
-        (output / 'keep').write_text('keep-me\n', encoding='utf-8')
-    else:
+    elif destination_kind == 'directory_symlink':
+        target = tmp_path / 'target'
+        target.mkdir()
+        output.symlink_to(target, target_is_directory=True)
+    elif destination_kind == 'dangling_symlink':
         output.symlink_to(tmp_path / 'missing-target')
+
+    with pytest.raises(FileExistsError, match='regular directory'):
+        reporter.report([source], output)
+
+    assert os.path.lexists(output)
+
+
+@pytest.mark.parametrize('report_name',
+                         ['summary.json', 'fres_scqo_plan_a_hrsc_audit.md'])
+@pytest.mark.parametrize('entry_kind', ['file', 'directory', 'dangling_link'])
+def test_reporter_refuses_existing_report_entries_in_evidence_directory(
+        tmp_path, report_name, entry_kind):
+    output = tmp_path / 'audit'
+    output.mkdir()
+    source = output / 'evidence.jsonl'
+    _write_jsonl(source, [_minimal_row()])
+    destination = output / report_name
+    if entry_kind == 'file':
+        destination.write_text('preserve-me\n', encoding='utf-8')
+    elif entry_kind == 'directory':
+        destination.mkdir()
+    else:
+        destination.symlink_to(output / 'missing-target')
 
     with pytest.raises(FileExistsError, match='already exist'):
         reporter.report([source], output)
 
-    assert os.path.lexists(output)
+    assert os.path.lexists(destination)
 
 
 def test_reporter_publishes_neither_file_if_rendering_fails(
@@ -1099,31 +1148,96 @@ def test_reporter_publishes_neither_file_if_rendering_fails(
         reporter.report([source], output)
 
     assert not os.path.lexists(output)
-    assert not list(tmp_path.glob('.report.tmp-*'))
-    assert not os.path.lexists(tmp_path / '.report.lock')
+    assert not list(tmp_path.glob('.*.tmp-*'))
 
 
-def test_reporter_atomic_publish_never_replaces_a_racing_empty_directory(
+def test_reporter_rolls_back_first_report_when_second_link_fails(
         tmp_path, monkeypatch):
-    source = tmp_path / 'rows.jsonl'
+    output = tmp_path / 'audit'
+    output.mkdir()
+    source = output / 'evidence.jsonl'
     _write_jsonl(source, [_minimal_row()])
-    output = tmp_path / 'report'
-    real_publish = reporter._rename_directory_no_replace
+    evidence_bytes = source.read_bytes()
+    real_link = reporter.os.link
+    calls = 0
 
-    def race_before_publish(staging, destination):
-        destination.mkdir()
-        real_publish(staging, destination)
+    def fail_second_link(source_path, destination_path, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError('synthetic second-link failure')
+        return real_link(source_path, destination_path, **kwargs)
 
-    monkeypatch.setattr(reporter, '_rename_directory_no_replace',
-                        race_before_publish)
+    monkeypatch.setattr(reporter.os, 'link', fail_second_link)
+
+    with pytest.raises(OSError, match='synthetic second-link failure'):
+        reporter.report([source], output)
+
+    assert source.read_bytes() == evidence_bytes
+    assert not os.path.lexists(output / 'summary.json')
+    assert not os.path.lexists(output / 'fres_scqo_plan_a_hrsc_audit.md')
+    assert not list(output.glob('.*.tmp-*'))
+    assert not os.path.lexists(output / '.scqo-report.lock')
+
+
+@pytest.mark.parametrize('racing_kind', ['file', 'directory', 'symlink'])
+def test_reporter_never_overwrites_a_racing_first_report_entry(
+        tmp_path, monkeypatch, racing_kind):
+    output = tmp_path / 'audit'
+    output.mkdir()
+    source = output / 'evidence.jsonl'
+    _write_jsonl(source, [_minimal_row()])
+    real_link = reporter.os.link
+    racing_path = output / 'summary.json'
+
+    def race_first_link(source_path, destination_path, **kwargs):
+        destination_path = Path(destination_path)
+        if destination_path.name == 'summary.json':
+            if racing_kind == 'file':
+                destination_path.write_text('racer\n', encoding='utf-8')
+            elif racing_kind == 'directory':
+                destination_path.mkdir()
+            else:
+                destination_path.symlink_to(output / 'missing-racer')
+        return real_link(source_path, destination_path, **kwargs)
+
+    monkeypatch.setattr(reporter.os, 'link', race_first_link)
 
     with pytest.raises(FileExistsError):
         reporter.report([source], output)
 
-    assert output.is_dir()
-    assert not list(output.iterdir())
-    assert not list(tmp_path.glob('.report.tmp-*'))
-    assert not os.path.lexists(tmp_path / '.report.lock')
+    assert os.path.lexists(racing_path)
+    if racing_kind == 'file':
+        assert racing_path.read_text(encoding='utf-8') == 'racer\n'
+    assert not os.path.lexists(output / 'fres_scqo_plan_a_hrsc_audit.md')
+    assert not list(output.glob('.*.tmp-*'))
+    assert not os.path.lexists(output / '.scqo-report.lock')
+
+
+def test_reporter_rolls_back_our_first_link_but_preserves_racing_second_link(
+        tmp_path, monkeypatch):
+    output = tmp_path / 'audit'
+    output.mkdir()
+    source = output / 'evidence.jsonl'
+    _write_jsonl(source, [_minimal_row()])
+    real_link = reporter.os.link
+    markdown = output / 'fres_scqo_plan_a_hrsc_audit.md'
+
+    def race_second_link(source_path, destination_path, **kwargs):
+        destination_path = Path(destination_path)
+        if destination_path.name == markdown.name:
+            destination_path.symlink_to(output / 'missing-racer')
+        return real_link(source_path, destination_path, **kwargs)
+
+    monkeypatch.setattr(reporter.os, 'link', race_second_link)
+
+    with pytest.raises(FileExistsError):
+        reporter.report([source], output)
+
+    assert not os.path.lexists(output / 'summary.json')
+    assert markdown.is_symlink()
+    assert not list(output.glob('.*.tmp-*'))
+    assert not os.path.lexists(output / '.scqo-report.lock')
 
 
 def test_all_plan_a_tools_cannot_start_training_or_overwrite_status():

@@ -2,12 +2,9 @@
 """Report the pre-registered SCQO Plan A evidence gate."""
 
 import argparse
-import ctypes
-import errno
 import json
 import math
 import os
-import shutil
 import tempfile
 from collections import defaultdict
 from numbers import Integral, Real
@@ -21,6 +18,10 @@ from mmrotate.evaluation.functional.scqo_diagnostics import (
     expected_calibration_error)
 
 SUMMARY_SCHEMA_VERSION = 1
+_SUMMARY_NAME = 'summary.json'
+_MARKDOWN_NAME = 'fres_scqo_plan_a_hrsc_audit.md'
+_LOCK_NAME = '.scqo-report.lock'
+_INCLUSIVE_TOLERANCE = 1e-12
 FEATURES = ('c2_determinantal', 'c2_spectral_tail', 'c2_fixed_space',
             'c2_q_gap', 'c4_determinantal', 'c4_spectral_tail',
             'c4_fixed_space', 'c4_q_gap', 'a2', 'a4', 'c4_negative_margin',
@@ -311,11 +312,18 @@ def _insufficient(rows, eligible, reason):
         reason=reason)
 
 
+def _inclusive_at_least(value, threshold):
+    return value >= threshold or math.isclose(
+        value, threshold, rel_tol=0.0, abs_tol=_INCLUSIVE_TOLERANCE)
+
+
 def _gate_b(combined_auroc, best_baseline, texture_aurocs):
     if any(value is None for value in texture_aurocs):
         return 'INSUFFICIENT'
+    gain = combined_auroc - best_baseline
     numeric_pass = (
-        combined_auroc >= 0.65 and combined_auroc >= best_baseline + 0.05)
+        _inclusive_at_least(combined_auroc, 0.65)
+        and _inclusive_at_least(gain, 0.05))
     return ('PASS' if numeric_pass
             and all(value > 0.5 for value in texture_aurocs) else 'FAIL')
 
@@ -409,84 +417,129 @@ def _markdown(summary):
     return '\n'.join(lines)
 
 
-def _rename_directory_no_replace(source: Path, destination: Path) -> None:
-    """Atomically publish a directory without replacing any path entry."""
-    libc = ctypes.CDLL(None, use_errno=True)
-    renameat2 = getattr(libc, 'renameat2', None)
-    if renameat2 is None:
-        if _path_entry_exists(destination):
-            raise FileExistsError(
-                f'report output already exists: {destination}')
-        os.rename(source, destination)
-        return
-    renameat2.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_int,
-                          ctypes.c_char_p, ctypes.c_uint)
-    renameat2.restype = ctypes.c_int
-    at_fdcwd = -100
-    rename_noreplace = 1
-    result = renameat2(at_fdcwd, os.fsencode(source), at_fdcwd,
-                       os.fsencode(destination), rename_noreplace)
-    if result == 0:
-        return
-    error_number = ctypes.get_errno()
-    if error_number in (errno.EEXIST, errno.ENOTEMPTY):
-        raise FileExistsError(error_number, 'report output already exists',
-                              destination)
-    raise OSError(error_number, os.strerror(error_number), destination)
+def _report_paths(output_dir: Path):
+    return output_dir / _SUMMARY_NAME, output_dir / _MARKDOWN_NAME
+
+
+def _validate_output_directory(output_dir: Path) -> bool:
+    """Validate the destination and return whether it already exists."""
+    if not _path_entry_exists(output_dir):
+        return False
+    if output_dir.is_symlink() or not output_dir.is_dir():
+        raise FileExistsError(
+            f'report output must be absent or an existing regular directory: '
+            f'{output_dir}')
+    existing = [
+        path for path in _report_paths(output_dir) if _path_entry_exists(path)
+    ]
+    if existing:
+        names = ', '.join(path.name for path in existing)
+        raise FileExistsError(f'report outputs already exist: {names}')
+    return True
+
+
+def _same_entry(path: Path, identity) -> bool:
+    try:
+        current = os.lstat(path)
+    except FileNotFoundError:
+        return False
+    return (current.st_dev, current.st_ino) == (identity.st_dev,
+                                                identity.st_ino)
+
+
+def _unlink_owned_entry(path: Path, identity) -> None:
+    if _same_entry(path, identity):
+        path.unlink()
+
+
+def _write_staged_file(output_dir: Path, prefix: str, text: str):
+    descriptor, raw_path = tempfile.mkstemp(prefix=prefix, dir=output_dir)
+    path = Path(raw_path)
+    try:
+        with os.fdopen(descriptor, 'w', encoding='utf-8') as stream:
+            stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
+        return path, os.lstat(path)
+    except BaseException:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        raise
 
 
 def _write_report_directory(output_dir: Path, summary: Mapping) -> None:
+    summary_text = json.dumps(
+        summary, allow_nan=False, ensure_ascii=False, indent=2,
+        sort_keys=True) + '\n'
+    markdown_text = _markdown(summary)
     output_dir = Path(os.path.abspath(output_dir))
-    if _path_entry_exists(output_dir):
-        raise FileExistsError(f'report output already exists: {output_dir}')
-    output_dir.parent.mkdir(parents=True, exist_ok=True)
-    lock_path = output_dir.parent / f'.{output_dir.name}.lock'
-    try:
-        lock_fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY,
-                          0o600)
-    except FileExistsError as error:
-        raise FileExistsError(
-            f'report output already exists or is being written: '
-            f'{output_dir}') from error
-    os.close(lock_fd)
-    staging = None
-    try:
-        if _path_entry_exists(output_dir):
-            raise FileExistsError(
-                f'report output already exists: {output_dir}')
-        staging = Path(
-            tempfile.mkdtemp(
-                prefix=f'.{output_dir.name}.tmp-', dir=output_dir.parent))
-        summary_path = staging / 'summary.json'
-        markdown_path = staging / 'fres_scqo_plan_a_hrsc_audit.md'
-        with summary_path.open('x', encoding='utf-8') as stream:
-            stream.write(
-                json.dumps(
-                    summary,
-                    allow_nan=False,
-                    ensure_ascii=False,
-                    indent=2,
-                    sort_keys=True) + '\n')
-        with markdown_path.open('x', encoding='utf-8') as stream:
-            stream.write(_markdown(summary))
-        if _path_entry_exists(output_dir):
-            raise FileExistsError(
-                f'report output already exists: {output_dir}')
-        _rename_directory_no_replace(staging, output_dir)
-        staging = None
-    finally:
-        if staging is not None:
-            shutil.rmtree(staging, ignore_errors=True)
+    existed = _validate_output_directory(output_dir)
+    created_dir = False
+    if not existed:
+        output_dir.parent.mkdir(parents=True, exist_ok=True)
         try:
-            lock_path.unlink()
-        except FileNotFoundError:
-            pass
+            output_dir.mkdir()
+            created_dir = True
+        except FileExistsError:
+            _validate_output_directory(output_dir)
+
+    lock_path = output_dir / _LOCK_NAME
+    lock_descriptor = None
+    lock_identity = None
+    staged = []
+    published = []
+    try:
+        try:
+            lock_descriptor = os.open(lock_path,
+                                      os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                                      0o600)
+        except FileExistsError as error:
+            raise FileExistsError(
+                f'report output is already being written: {output_dir}') \
+                from error
+        lock_identity = os.fstat(lock_descriptor)
+        os.close(lock_descriptor)
+        lock_descriptor = None
+        _validate_output_directory(output_dir)
+
+        staged.append(
+            _write_staged_file(output_dir, f'.{_SUMMARY_NAME}.tmp-',
+                               summary_text))
+        staged.append(
+            _write_staged_file(output_dir, f'.{_MARKDOWN_NAME}.tmp-',
+                               markdown_text))
+        for (source,
+             source_identity), destination in zip(staged,
+                                                  _report_paths(output_dir)):
+            os.link(source, destination, follow_symlinks=False)
+            published.append((destination, source_identity))
+    except BaseException:
+        for path, identity in reversed(published):
+            _unlink_owned_entry(path, identity)
+        raise
+    finally:
+        if lock_descriptor is not None:
+            os.close(lock_descriptor)
+        for path, identity in staged:
+            _unlink_owned_entry(path, identity)
+        if lock_identity is not None:
+            _unlink_owned_entry(lock_path, lock_identity)
+        if created_dir:
+            try:
+                output_dir.rmdir()
+            except OSError:
+                pass
 
 
 def report(evidence_paths: Sequence[Path], output_dir: Path):
     output_dir = Path(os.path.abspath(output_dir))
-    if _path_entry_exists(output_dir):
-        raise FileExistsError(f'report output already exists: {output_dir}')
+    _validate_output_directory(output_dir)
     runs, sources = load_rows(evidence_paths)
     summary = dict(
         schema_version=SUMMARY_SCHEMA_VERSION,
