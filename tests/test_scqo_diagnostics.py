@@ -10,7 +10,7 @@ import torch
 
 from mmrotate.evaluation.functional import scqo_diagnostics as diagnostics
 from mmrotate.evaluation.functional.scqo_diagnostics import (
-    binary_average_precision, binary_auroc, cross_validated_logistic_probe,
+    binary_auroc, binary_average_precision, cross_validated_logistic_probe,
     expected_calibration_error, match_rotated_predictions,
     periodic_angle_error)
 

@@ -228,9 +228,9 @@ class GroupOrbitDeterminantalClusterLoss(torch.nn.Module):
         if orbit.dtype in (torch.float16, torch.bfloat16):
             work_orbit = orbit.float()
         batch_size, group_order = work_orbit.shape[:2]
-        statistic_names = (
-            'determinantal', 'spectral_tail', 'fixed_space', 'q_gap',
-            'energy', 'variance', 'energy_guard', 'variance_guard')
+        statistic_names = ('determinantal', 'spectral_tail', 'fixed_space',
+                           'q_gap', 'energy', 'variance', 'energy_guard',
+                           'variance_guard')
         if batch_size == 0:
             empty = work_orbit.new_empty((0, ))
             return {name: empty.clone() for name in statistic_names}

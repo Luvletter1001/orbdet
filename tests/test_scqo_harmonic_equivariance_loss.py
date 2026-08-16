@@ -15,8 +15,8 @@ def _rotation(angle, *, dtype=torch.float32):
 
 @pytest.mark.parametrize('order', [2, 4])
 def test_induced_actions_match_harmonic_rotation_and_reflection(order):
-    from mmrotate.models.losses.scqo_harmonic_equivariance_loss import (
-        induced_harmonic_action, )
+    from mmrotate.models.losses.scqo_harmonic_equivariance_loss import \
+        induced_harmonic_action
 
     theta, phi = 0.31, 0.47
     harmonic = torch.tensor([math.cos(order * theta), math.sin(order * theta)])
@@ -57,8 +57,8 @@ def test_equivariance_loss_is_zero_for_correct_views_and_differentiable():
 
 
 def test_zero_carriers_have_finite_unit_loss_without_reduction():
-    from mmrotate.models.losses.scqo_harmonic_equivariance_loss import (
-        SCQOHarmonicEquivarianceLoss, )
+    from mmrotate.models.losses.scqo_harmonic_equivariance_loss import \
+        SCQOHarmonicEquivarianceLoss
 
     loss_fn = SCQOHarmonicEquivarianceLoss(order=2, reduction='none')
     zero = torch.zeros(3, 2)
@@ -71,8 +71,8 @@ def test_zero_carriers_have_finite_unit_loss_without_reduction():
 
 
 def test_zero_reference_has_a_finite_recovery_gradient():
-    from mmrotate.models.losses.scqo_harmonic_equivariance_loss import (
-        SCQOHarmonicEquivarianceLoss, )
+    from mmrotate.models.losses.scqo_harmonic_equivariance_loss import \
+        SCQOHarmonicEquivarianceLoss
 
     reference = torch.zeros(2, requires_grad=True)
     view = torch.tensor([1.0, 0.0])
@@ -87,8 +87,8 @@ def test_zero_reference_has_a_finite_recovery_gradient():
 
 
 def test_singleton_weights_preserve_none_reduction_loss_shape():
-    from mmrotate.models.losses.scqo_harmonic_equivariance_loss import (
-        SCQOHarmonicEquivarianceLoss, )
+    from mmrotate.models.losses.scqo_harmonic_equivariance_loss import \
+        SCQOHarmonicEquivarianceLoss
 
     loss_fn = SCQOHarmonicEquivarianceLoss(order=2, reduction='none')
     reference = torch.tensor([1.0, 0.0])
@@ -108,8 +108,8 @@ def test_singleton_weights_preserve_none_reduction_loss_shape():
 
 
 def test_normalize_harmonic_handles_extreme_finite_carriers():
-    from mmrotate.models.losses.scqo_harmonic_equivariance_loss import (
-        normalize_harmonic, )
+    from mmrotate.models.losses.scqo_harmonic_equivariance_loss import \
+        normalize_harmonic
 
     normalized = normalize_harmonic(
         torch.tensor([[2e19, 2e19]], dtype=torch.float32))
@@ -158,8 +158,8 @@ def test_float16_inputs_are_promoted_to_float32():
 
 @pytest.mark.parametrize('order', [2, 4])
 def test_decode_harmonic_angle_respects_quotient_period(order):
-    from mmrotate.models.losses.scqo_harmonic_equivariance_loss import (
-        decode_harmonic_angle, )
+    from mmrotate.models.losses.scqo_harmonic_equivariance_loss import \
+        decode_harmonic_angle
 
     angles = torch.tensor([-1.2, -0.2, 0.7])
     carriers = torch.stack(
@@ -174,8 +174,8 @@ def test_decode_harmonic_angle_respects_quotient_period(order):
 
 
 def test_registry_builds_loss_and_rejects_non_orthogonal_transform():
-    from mmrotate.models.losses.scqo_harmonic_equivariance_loss import (
-        induced_harmonic_action, )
+    from mmrotate.models.losses.scqo_harmonic_equivariance_loss import \
+        induced_harmonic_action
 
     register_all_modules()
     loss = MODELS.build(dict(type='SCQOHarmonicEquivarianceLoss', order=4))

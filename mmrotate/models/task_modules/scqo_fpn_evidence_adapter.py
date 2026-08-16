@@ -6,10 +6,10 @@ from numbers import Real
 from typing import Dict, List, Sequence, Tuple
 
 import torch
-from mmdet.structures.bbox import bbox2roi
-from mmdet.utils import ConfigType, InstanceList
 from torch import Tensor
 
+from mmdet.structures.bbox import bbox2roi
+from mmdet.utils import ConfigType, InstanceList
 from mmrotate.registry import MODELS
 
 
@@ -22,8 +22,8 @@ class SCQOFPNInstanceEvidence(torch.nn.Module):
                  evidence: ConfigType,
                  min_box_size: float = 2.0) -> None:
         super().__init__()
-        if isinstance(min_box_size, bool) or not isinstance(
-                min_box_size, Real):
+        if isinstance(min_box_size,
+                      bool) or not isinstance(min_box_size, Real):
             raise TypeError('min_box_size must be a real number')
         if not math.isfinite(min_box_size) or min_box_size <= 0:
             raise ValueError('min_box_size must be finite and positive')
@@ -31,8 +31,7 @@ class SCQOFPNInstanceEvidence(torch.nn.Module):
         self.evidence = MODELS.build(evidence)
         self.min_box_size = min_box_size
 
-    def _validate_img_shapes(self,
-                             batch_img_metas: Sequence[dict]) -> None:
+    def _validate_img_shapes(self, batch_img_metas: Sequence[dict]) -> None:
         for meta in batch_img_metas:
             try:
                 img_shape = meta['img_shape']
@@ -50,7 +49,7 @@ class SCQOFPNInstanceEvidence(torch.nn.Module):
                         'real numbers')
 
     def _square_boxes(
-            self, batch_gt_instances: InstanceList
+        self, batch_gt_instances: InstanceList
     ) -> Tuple[List[Tensor], Tensor, Tensor, Tensor]:
         boxes_per_image = []
         batch_indices = []
@@ -70,12 +69,10 @@ class SCQOFPNInstanceEvidence(torch.nn.Module):
             original_index = valid.nonzero().reshape(-1)
             hboxes = hboxes[valid]
             center = (hboxes[:, :2] + hboxes[:, 2:]) / 2
-            side = torch.maximum(
-                hboxes[:, 2] - hboxes[:, 0],
-                hboxes[:, 3] - hboxes[:, 1])
+            side = torch.maximum(hboxes[:, 2] - hboxes[:, 0],
+                                 hboxes[:, 3] - hboxes[:, 1])
             square = torch.cat(
-                (center - side[:, None] / 2,
-                 center + side[:, None] / 2),
+                (center - side[:, None] / 2, center + side[:, None] / 2),
                 dim=1)
             boxes_per_image.append(square)
             batch_indices.append(
@@ -84,30 +81,27 @@ class SCQOFPNInstanceEvidence(torch.nn.Module):
             labels.append(instances.labels[valid])
         reference = batch_gt_instances[0].bboxes.tensor
         empty_long = reference.new_empty((0, ), dtype=torch.long)
-        return (
-            boxes_per_image,
-            torch.cat(batch_indices) if batch_indices else empty_long,
-            torch.cat(instance_indices) if instance_indices else empty_long,
-            torch.cat(labels) if labels else empty_long)
+        return (boxes_per_image,
+                torch.cat(batch_indices) if batch_indices else empty_long,
+                torch.cat(instance_indices) if instance_indices else
+                empty_long, torch.cat(labels) if labels else empty_long)
 
     def _support(self, rois: Tensor,
                  batch_img_metas: Sequence[dict]) -> Tensor:
         size = self.evidence.roi_size
-        work_rois = rois.float() if rois.dtype in (
-            torch.float16, torch.bfloat16) else rois
-        grid = (
-            torch.arange(
-                size, device=work_rois.device, dtype=work_rois.dtype) + 0.5
-        ) / size
-        x = work_rois[:, 1, None] + grid[None] * (
-            work_rois[:, 3] - work_rois[:, 1])[:, None]
-        y = work_rois[:, 2, None] + grid[None] * (
-            work_rois[:, 4] - work_rois[:, 2])[:, None]
+        work_rois = rois.float() if rois.dtype in (torch.float16,
+                                                   torch.bfloat16) else rois
+        grid = (torch.arange(
+            size, device=work_rois.device, dtype=work_rois.dtype) + 0.5) / size
+        x = work_rois[:, 1, None] + grid[None] * (work_rois[:, 3] -
+                                                  work_rois[:, 1])[:, None]
+        y = work_rois[:, 2, None] + grid[None] * (work_rois[:, 4] -
+                                                  work_rois[:, 2])[:, None]
         masks = []
         for row, x_row, y_row in zip(rois, x, y):
             image_index = int(row[0])
-            image_height, image_width = batch_img_metas[
-                image_index]['img_shape'][:2]
+            image_height, image_width = batch_img_metas[image_index][
+                'img_shape'][:2]
             valid_x = (x_row >= 0) & (x_row < image_width)
             valid_y = (y_row >= 0) & (y_row < image_height)
             masks.append(valid_y[:, None] & valid_x[None, :])
@@ -128,9 +122,8 @@ class SCQOFPNInstanceEvidence(torch.nn.Module):
             square_hbox=reference.new_empty((0, 4), dtype=output_dtype))
         return result
 
-    def forward(self,
-                features: Tuple[Tensor, ...],
-                batch_gt_instances: InstanceList,
+    def forward(self, features: Tuple[Tensor,
+                                      ...], batch_gt_instances: InstanceList,
                 batch_img_metas: Sequence[dict]) -> Dict[str, Tensor]:
         """Return detached per-instance evidence and source identities."""
         if not features or len(features) < self.roi_extractor.num_inputs:
@@ -138,8 +131,7 @@ class SCQOFPNInstanceEvidence(torch.nn.Module):
         if len(batch_gt_instances) != len(batch_img_metas):
             raise ValueError('instances and image metadata must align')
         batch_size = len(batch_gt_instances)
-        consumed_features = tuple(
-            features[:self.roi_extractor.num_inputs])
+        consumed_features = tuple(features[:self.roi_extractor.num_inputs])
         for feature in consumed_features:
             if not isinstance(feature, Tensor) or feature.ndim != 4:
                 raise ValueError(
@@ -167,8 +159,7 @@ class SCQOFPNInstanceEvidence(torch.nn.Module):
         output_dtype = result['support_fraction'].dtype
         result.update(
             batch_index=batch_index.detach().to(device=reference.device),
-            instance_index=instance_index.detach().to(
-                device=reference.device),
+            instance_index=instance_index.detach().to(device=reference.device),
             label=labels.detach().to(device=reference.device),
             fpn_level=fpn_level.detach(),
             square_hbox=rois[:, 1:].detach().to(dtype=output_dtype))

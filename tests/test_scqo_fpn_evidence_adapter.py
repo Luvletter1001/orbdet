@@ -4,8 +4,8 @@ import pytest
 import torch
 from mmengine.structures import InstanceData
 
-from mmrotate.models.task_modules.scqo_fpn_evidence_adapter import (
-    SCQOFPNInstanceEvidence)
+from mmrotate.models.task_modules.scqo_fpn_evidence_adapter import \
+    SCQOFPNInstanceEvidence
 from mmrotate.registry import MODELS
 from mmrotate.structures import RotatedBoxes
 from mmrotate.utils import register_all_modules
@@ -140,17 +140,18 @@ def test_adapter_reports_single_roi_extractor_fpn_levels():
         torch.randn(1, 4, 48, 48, requires_grad=True),
         torch.randn(1, 4, 24, 24, requires_grad=True),
     )
-    instances = [_instances([
-        [16, 16, 8, 8, 0],
-        [40, 40, 16, 16, 0],
-        [68, 68, 32, 32, 0],
-    ], [0, 1, 2])]
+    instances = [
+        _instances([
+            [16, 16, 8, 8, 0],
+            [40, 40, 16, 16, 0],
+            [68, 68, 32, 32, 0],
+        ], [0, 1, 2])
+    ]
 
     result = module(features, instances, [dict(img_shape=(96, 96))])
 
-    rois = torch.cat((
-        result['batch_index'].to(result['square_hbox']).unsqueeze(1),
-        result['square_hbox']),
+    rois = torch.cat((result['batch_index'].to(
+        result['square_hbox']).unsqueeze(1), result['square_hbox']),
                      dim=1)
     expected = module.roi_extractor.map_roi_levels(
         rois, module.roi_extractor.num_inputs)
@@ -207,8 +208,8 @@ def test_adapter_rejects_boolean_minimum_box_size(min_box_size):
         MODELS.build(cfg)
 
 
-@pytest.mark.parametrize('min_box_size', ['2', None, 2 + 0j,
-                                           torch.tensor(2.0)])
+@pytest.mark.parametrize(
+    'min_box_size', ['2', None, 2 + 0j, torch.tensor(2.0)])
 def test_adapter_rejects_non_real_minimum_box_size(min_box_size):
     register_all_modules()
     cfg = _cfg()
@@ -237,8 +238,8 @@ def test_adapter_rejects_insufficient_features_or_unaligned_metadata():
         module((torch.randn(1, 4, 16, 16), ), instances,
                [dict(img_shape=(16, 16))])
     with pytest.raises(ValueError, match='align'):
-        module((torch.randn(1, 4, 16, 16),
-                torch.randn(1, 4, 8, 8)), instances, [])
+        module((torch.randn(1, 4, 16, 16), torch.randn(1, 4, 8, 8)), instances,
+               [])
 
 
 @pytest.mark.parametrize('batch_sizes', [(0, ), (2, ), (1, 0), (1, 2)])
@@ -304,8 +305,9 @@ def test_adapter_rejects_invalid_image_shape(meta):
 def test_adapter_validates_image_shape_even_without_instances():
     register_all_modules()
     module = MODELS.build(_contract_cfg())
-    instances = [_instances(torch.empty(0, 5),
-                            torch.empty(0, dtype=torch.long))]
+    instances = [
+        _instances(torch.empty(0, 5), torch.empty(0, dtype=torch.long))
+    ]
 
     with pytest.raises(ValueError, match='img_shape'):
         module((torch.randn(1, 4, 20, 20), ), instances,

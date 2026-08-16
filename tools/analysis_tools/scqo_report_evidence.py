@@ -14,7 +14,7 @@ from typing import Dict, Iterable, Mapping, Optional, Sequence, Tuple
 import numpy as np
 
 from mmrotate.evaluation.functional.scqo_diagnostics import (
-    binary_average_precision, binary_auroc, cross_validated_logistic_probe,
+    binary_auroc, binary_average_precision, cross_validated_logistic_probe,
     expected_calibration_error)
 
 SUMMARY_SCHEMA_VERSION = 1

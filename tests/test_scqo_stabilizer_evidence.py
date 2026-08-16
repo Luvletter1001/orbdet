@@ -1,8 +1,8 @@
 import pytest
 import torch
 
-from mmrotate.models.task_modules.scqo_stabilizer_evidence import (
-    SCQOStabilizerEvidence)
+from mmrotate.models.task_modules.scqo_stabilizer_evidence import \
+    SCQOStabilizerEvidence
 
 
 def _cross(size=14):
