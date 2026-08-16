@@ -9,6 +9,11 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from mmengine.structures import InstanceData
+
+from mmdet.models.detectors.base import BaseDetector
+from mmdet.structures import DetDataSample
+from mmrotate.structures import RotatedBoxes
 
 from tools.analysis_tools import scqo_collect_evidence as collector
 from tools.analysis_tools.scqo_collect_evidence import (_evidence_cfg, _scalar,
@@ -37,8 +42,8 @@ def _arguments(tmp_path, *, max_images=None):
 
 def _instances(boxes, labels, scores=None):
     instances = SimpleNamespace(
-        bboxes=SimpleNamespace(
-            tensor=torch.as_tensor(boxes, dtype=torch.float32).reshape(-1, 5)),
+        bboxes=RotatedBoxes(
+            torch.as_tensor(boxes, dtype=torch.float32).reshape(-1, 5)),
         labels=torch.as_tensor(labels, dtype=torch.long))
     if scores is not None:
         instances.scores = torch.as_tensor(scores, dtype=torch.float32)
@@ -90,6 +95,26 @@ class _FakeModel(torch.nn.Module):
         return [sample.prediction for sample in samples]
 
 
+class _BoxConvertingModel(_FakeModel):
+
+    def __init__(self, results):
+        super().__init__()
+        self.results = results
+        self.box_types_after_predict = None
+
+    def predict(self, inputs, samples, rescale=False):
+        assert rescale is False
+        assert torch.is_inference_mode_enabled()
+        self.predicted_image_ids.extend(sample.metainfo['img_id']
+                                        for sample in samples)
+        predictions = BaseDetector.add_pred_to_datasample(
+            self, samples, self.results)
+        self.box_types_after_predict = [(type(sample.gt_instances.bboxes),
+                                         type(sample.pred_instances.bboxes))
+                                        for sample in samples]
+        return predictions
+
+
 class _FakeEvidence(torch.nn.Module):
 
     def __init__(self, *, on_forward=None):
@@ -131,14 +156,34 @@ class _FakeEvidence(torch.nn.Module):
             valid=torch.ones(len(rows), dtype=torch.bool))
 
 
+class _RotatedBoxContractEvidence(_FakeEvidence):
+
+    def __init__(self):
+        super().__init__()
+        self.box_types = []
+
+    def forward(self, features, gt_instances, metas):
+        self.box_types.extend(
+            type(instances.bboxes) for instances in gt_instances)
+        for instances in gt_instances:
+            if not isinstance(instances.bboxes, RotatedBoxes):
+                raise TypeError('evidence adapter requires RotatedBoxes')
+            instances.bboxes.convert_to('hbox')
+        return super().forward(features, gt_instances, metas)
+
+
 def _install_fake_runtime(monkeypatch,
                           samples,
                           *,
                           fail_on_extract=False,
                           on_load=None,
-                          on_evidence=None):
-    model = _FakeModel(fail_on_extract=fail_on_extract)
-    evidence = _FakeEvidence(on_forward=on_evidence)
+                          on_evidence=None,
+                          model=None,
+                          evidence=None):
+    if model is None:
+        model = _FakeModel(fail_on_extract=fail_on_extract)
+    if evidence is None:
+        evidence = _FakeEvidence(on_forward=on_evidence)
     cfg = SimpleNamespace(load_from='old.pth', resume=True, work_dir='old')
     runner = SimpleNamespace(
         model=model,
@@ -194,6 +239,23 @@ def _single_sample(image_id='img-0'):
                    [0.9], [0])
 
 
+def _real_box_sample():
+    sample = DetDataSample()
+    sample.set_metainfo(dict(img_id='img-0', img_shape=(64, 64)))
+    ground_truth = InstanceData()
+    ground_truth.bboxes = RotatedBoxes(
+        torch.tensor([[10.0, 10.0, 8.0, 4.0, 0.1]]))
+    ground_truth.labels = torch.tensor([0], dtype=torch.long)
+    sample.gt_instances = ground_truth
+
+    prediction = InstanceData()
+    prediction.bboxes = RotatedBoxes(
+        torch.tensor([[10.0, 10.0, 8.0, 4.0, 0.2]]))
+    prediction.scores = torch.tensor([0.9])
+    prediction.labels = torch.tensor([0], dtype=torch.long)
+    return sample, prediction
+
+
 def test_collector_help_and_row_schema():
     completed = subprocess.run(
         [sys.executable, str(COLLECTOR), '--help'],
@@ -242,6 +304,20 @@ def test_sha256_hashes_file_bytes(tmp_path):
     path.write_bytes(payload)
 
     assert sha256(path) == hashlib.sha256(payload).hexdigest()
+
+
+def test_box_tensor_accepts_only_baseboxes_or_n_by_five_tensors():
+    tensor = torch.zeros((2, 5))
+    boxes = RotatedBoxes(tensor)
+
+    assert collector._box_tensor(boxes) is boxes.tensor
+    assert collector._box_tensor(tensor) is tensor
+    with pytest.raises(TypeError, match='BaseBoxes or torch.Tensor'):
+        collector._box_tensor(SimpleNamespace(tensor=tensor))
+    with pytest.raises(ValueError, match=r'\[N, 5\]'):
+        collector._box_tensor(torch.zeros((2, 4)))
+    with pytest.raises(ValueError, match=r'\[N, 5\]'):
+        collector._box_tensor(torch.zeros(5))
 
 
 @pytest.mark.parametrize('value', [
@@ -464,6 +540,45 @@ def test_collector_runs_frozen_inference_and_preserves_per_image_identity(
     assert runtime['evidence'].to_device == torch.device('cpu')
     assert not Path(runtime['calls']['work_dir']).exists()
     assert not list(tmp_path.glob('.*.tmp'))
+
+
+def test_collector_extracts_evidence_before_real_prediction_box_conversion(
+        tmp_path, monkeypatch):
+    args = _arguments(tmp_path)
+    sample, prediction = _real_box_sample()
+    model = _BoxConvertingModel([prediction])
+    evidence = _RotatedBoxContractEvidence()
+    _install_fake_runtime(
+        monkeypatch, [sample], model=model, evidence=evidence)
+
+    manifest = collect(args)
+
+    rows = [json.loads(line) for line in args.output.read_text().splitlines()]
+    assert evidence.box_types == [RotatedBoxes]
+    assert model.box_types_after_predict == [(torch.Tensor, torch.Tensor)]
+    assert isinstance(sample.gt_instances.bboxes, torch.Tensor)
+    assert isinstance(sample.pred_instances.bboxes, torch.Tensor)
+    assert manifest['row_count'] == 1
+    assert manifest['matched_count'] == 1
+    assert args.output.with_suffix('.manifest.json').is_file()
+    assert len(rows) == 1
+    row = rows[0]
+    assert row['image_id'] == 'img-0'
+    assert row['gt_index'] == 0
+    assert row['label'] == 0
+    assert row['evidence_available'] is True
+    assert row['fpn_level'] == 2.0
+    assert row['energy'] == pytest.approx(0.7)
+    assert row['matched'] is True
+    assert row['pred_index'] == 0
+    assert row['rotated_iou'] > 0.8
+    assert row['angle_error_deg'] == pytest.approx(math.degrees(0.1), abs=1e-5)
+    assert row['angle_error_c4_deg'] == pytest.approx(
+        math.degrees(0.1), abs=1e-5)
+    assert row['gt_width'] == 8.0
+    assert row['gt_height'] == 4.0
+    assert row['gt_area'] == 32.0
+    assert row['gt_aspect_ratio'] == 2.0
 
 
 @pytest.mark.parametrize(('field', 'value', 'message'), [

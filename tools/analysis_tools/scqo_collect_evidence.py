@@ -15,6 +15,7 @@ import torch
 from mmengine.config import Config
 from mmengine.runner import Runner
 
+from mmdet.structures.bbox import BaseBoxes
 from mmrotate.evaluation.functional.scqo_diagnostics import (
     match_rotated_predictions, periodic_angle_error)
 from mmrotate.registry import MODELS
@@ -62,6 +63,19 @@ def _scalar(value):
     if not math.isfinite(value):
         raise ValueError('row evidence scalar must be finite')
     return value
+
+
+def _box_tensor(boxes) -> torch.Tensor:
+    """Return an ``[N, 5]`` tensor from a rotated box container or tensor."""
+    if isinstance(boxes, BaseBoxes):
+        tensor = boxes.tensor
+    elif isinstance(boxes, torch.Tensor):
+        tensor = boxes
+    else:
+        raise TypeError('boxes must be BaseBoxes or torch.Tensor')
+    if tensor.ndim != 2 or tensor.shape[1] != 5:
+        raise ValueError('rotated boxes must have shape [N, 5]')
+    return tensor
 
 
 def _validate_mapping_keys(values: Mapping, name: str) -> None:
@@ -281,22 +295,24 @@ def _evidence_by_image(result: Mapping, samples):
     return grouped
 
 
-def _match_by_gt(pred, gt, score_threshold: float,
+def _match_by_gt(pred, gt_boxes, gt_labels, score_threshold: float,
                  iou_threshold: float) -> Dict[int, Dict]:
+    pred_boxes = _box_tensor(pred.bboxes)
+    gt_boxes = _box_tensor(gt_boxes)
     matches = match_rotated_predictions(
-        pred.bboxes.tensor,
+        pred_boxes,
         pred.scores,
         pred.labels,
-        gt.bboxes.tensor,
-        gt.labels,
+        gt_boxes,
+        gt_labels,
         score_threshold=score_threshold,
         iou_threshold=iou_threshold)
     result = {}
     for offset in range(matches['gt_index'].numel()):
         gt_index = int(matches['gt_index'][offset])
         pred_index = int(matches['pred_index'][offset])
-        pred_angle = pred.bboxes.tensor[pred_index, 4]
-        gt_angle = gt.bboxes.tensor[gt_index, 4]
+        pred_angle = pred_boxes[pred_index, 4]
+        gt_angle = gt_boxes[gt_index, 4]
         error = periodic_angle_error(pred_angle, gt_angle, period=math.pi)
         error_c4 = periodic_angle_error(
             pred_angle, gt_angle, period=math.pi / 2)
@@ -347,27 +363,37 @@ def _write_rows(stream, runner, model, evidence_module, run_name: str,
             if not samples:
                 continue
             features = model.extract_feat(inputs)
-            predictions = list(model.predict(inputs, samples, rescale=False))
-            if len(predictions) != len(samples):
-                raise ValueError('predictions and data samples must align')
             raw_evidence = evidence_module(
                 features, [sample.gt_instances for sample in samples],
                 [sample.metainfo for sample in samples])
             evidence_by_image = _evidence_by_image(raw_evidence, samples)
+            gt_snapshots = [
+                dict(
+                    image_id=str(sample.metainfo['img_id']),
+                    boxes=_box_tensor(
+                        sample.gt_instances.bboxes).detach().clone(),
+                    labels=sample.gt_instances.labels.detach().clone())
+                for sample in samples
+            ]
+            predictions = list(model.predict(inputs, samples, rescale=False))
+            if len(predictions) != len(samples):
+                raise ValueError('predictions and data samples must align')
 
-            for batch_index, (sample, prediction) in enumerate(
-                    zip(samples, predictions)):
-                gt = sample.gt_instances
+            for batch_index, (gt_snapshot, prediction) in enumerate(
+                    zip(gt_snapshots, predictions)):
                 pred = prediction.pred_instances
-                match_by_gt = _match_by_gt(pred, gt, score_threshold,
-                                           iou_threshold)
+                gt_boxes = _box_tensor(gt_snapshot['boxes'])
+                gt_labels = gt_snapshot['labels']
+                match_by_gt = _match_by_gt(pred, gt_boxes, gt_labels,
+                                           score_threshold, iou_threshold)
                 evidence_by_gt = evidence_by_image[batch_index]
-                for gt_index, label in enumerate(gt.labels.tolist()):
+                for gt_index, label in enumerate(gt_labels.tolist()):
                     match = match_by_gt.get(gt_index)
-                    row = build_evidence_row(
-                        run_name, sample.metainfo['img_id'], gt_index, label,
-                        evidence_by_gt.get(gt_index),
-                        _geometry(gt.bboxes.tensor[gt_index]), match)
+                    row = build_evidence_row(run_name, gt_snapshot['image_id'],
+                                             gt_index, label,
+                                             evidence_by_gt.get(gt_index),
+                                             _geometry(gt_boxes[gt_index]),
+                                             match)
                     stream.write(
                         json.dumps(
                             row,
