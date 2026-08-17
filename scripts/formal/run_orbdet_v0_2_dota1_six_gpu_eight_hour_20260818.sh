@@ -17,8 +17,11 @@ ms_posteval_launcher="${repo_root}/scripts/eval/run_orbdet_v0_2_dota1_msrr_epoch
 
 deadline_epoch="$(rtk date -d "${deadline}" +%s)"
 ms_pid=''
+ms_pgid=''
 ss_pid=''
+ss_pgid=''
 sync_pid=''
+sync_pgid=''
 controller_active=0
 
 at_deadline() {
@@ -47,24 +50,89 @@ child_is_running() {
   return 1
 }
 
-terminate_owned_children() {
-  local pid
-  for pid in "${ms_pid}" "${ss_pid}" "${sync_pid}"; do
-    if child_is_running "${pid}"; then
-      rtk kill -TERM "${pid}" 2>/dev/null || true
+owned_session_is_verified() {
+  local wrapper_pid=$1
+  local pgid=$2
+  local process_row
+  local leader_pid
+  local parent_pid
+  local actual_pgid
+  local session_id
+  [[ "${wrapper_pid}" =~ ^[0-9]+$ && "${pgid}" =~ ^[0-9]+$ ]] || return 1
+  child_is_running "${wrapper_pid}" || return 1
+  process_row="$(rtk ps -o pid=,ppid=,pgid=,sid= -p "${pgid}")"
+  read -r leader_pid parent_pid actual_pgid session_id <<<"${process_row}"
+  [[ "${leader_pid}" == "${pgid}" &&
+     "${parent_pid}" == "${wrapper_pid}" &&
+     "${actual_pgid}" == "${pgid}" &&
+     "${session_id}" == "${pgid}" ]]
+}
+
+owned_group_has_members() {
+  local pgid=$1
+  rtk ps -eo pgid= | rtk awk -v target="${pgid}" \
+    '$1 == target { found = 1 } END { exit !found }'
+}
+
+signal_owned_group() {
+  local wrapper_pid=$1
+  local pgid=$2
+  if ! owned_session_is_verified "${wrapper_pid}" "${pgid}"; then
+    return 1
+  fi
+  rtk kill -TERM -- "-${pgid}" 2>/dev/null || true
+}
+
+wait_for_owned_group_shutdown() {
+  local pgid=$1
+  local sample
+  for sample in {1..30}; do
+    if ! owned_group_has_members "${pgid}"; then
+      return 0
     fi
+    rtk sleep 1
   done
+  if owned_group_has_members "${pgid}"; then
+    rtk kill -KILL -- "-${pgid}" 2>/dev/null || true
+  fi
+}
+
+terminate_owned_children() {
+  local ms_group_owned=0
+  local ss_group_owned=0
+  local sync_group_owned=0
+  if signal_owned_group "${ms_pid}" "${ms_pgid}"; then
+    ms_group_owned=1
+  fi
+  if signal_owned_group "${ss_pid}" "${ss_pgid}"; then
+    ss_group_owned=1
+  fi
+  if signal_owned_group "${sync_pid}" "${sync_pgid}"; then
+    sync_group_owned=1
+  fi
+  if (( ms_group_owned == 1 )); then
+    wait_for_owned_group_shutdown "${ms_pgid}"
+  fi
+  if (( ss_group_owned == 1 )); then
+    wait_for_owned_group_shutdown "${ss_pgid}"
+  fi
+  if (( sync_group_owned == 1 )); then
+    wait_for_owned_group_shutdown "${sync_pgid}"
+  fi
   if [[ -n "${ms_pid}" ]]; then
     wait "${ms_pid}" 2>/dev/null || true
     ms_pid=''
+    ms_pgid=''
   fi
   if [[ -n "${ss_pid}" ]]; then
     wait "${ss_pid}" 2>/dev/null || true
     ss_pid=''
+    ss_pgid=''
   fi
   if [[ -n "${sync_pid}" ]]; then
     wait "${sync_pid}" 2>/dev/null || true
     sync_pid=''
+    sync_pgid=''
   fi
 }
 
@@ -230,16 +298,66 @@ print(f"validated exact gate step {gate_step}; latest step {latest['step']}")
 PY
 }
 
+start_managed_job() {
+  local launcher=$1
+  local log_path=$2
+  local label=$3
+  local pid_variable=$4
+  local pgid_variable=$5
+  local ready_path="${controller_root}/${label}_process_group.pgid"
+  local wrapper_pid
+  local pgid=''
+  local sample
+
+  rtk setsid --wait rtk bash -c '
+    set -euo pipefail
+    ready_path=$1
+    launcher=$2
+    pgid="$(rtk ps -o pgid= -p "$$")"
+    session_id="$(rtk ps -o sid= -p "$$")"
+    pgid="${pgid//[[:space:]]/}"
+    session_id="${session_id//[[:space:]]/}"
+    if [[ ! "${pgid}" =~ ^[0-9]+$ || "${session_id}" != "${pgid}" ]]; then
+      rtk echo "Could not establish a dedicated owned process group." >&2
+      exit 70
+    fi
+    rtk printf "%s\n" "${pgid}" >"${ready_path}"
+    exec rtk bash "${launcher}"
+  ' owned-session "${ready_path}" "${launcher}" >"${log_path}" 2>&1 &
+  wrapper_pid=$!
+  printf -v "${pid_variable}" '%s' "${wrapper_pid}"
+
+  for sample in {1..50}; do
+    if [[ -s "${ready_path}" ]]; then
+      pgid="$(rtk sed -n '1p' "${ready_path}")"
+      break
+    fi
+    if ! child_is_running "${wrapper_pid}"; then
+      break
+    fi
+    rtk sleep 0.1
+  done
+  printf -v "${pgid_variable}" '%s' "${pgid}"
+  if ! owned_session_is_verified "${wrapper_pid}" "${pgid}"; then
+    rtk echo "Could not verify owned process group for ${label}." >&2
+    return 71
+  fi
+}
+
 run_synchronously() {
   local launcher=$1
   local log_path=$2
+  local label=$3
   local exit_code
+  if ! start_managed_job "${launcher}" "${log_path}" "${label}" \
+      sync_pid sync_pgid; then
+    return 71
+  fi
   set +e
-  rtk bash "${launcher}" >"${log_path}" 2>&1 &
-  sync_pid=$!
   wait "${sync_pid}"
   exit_code=$?
   sync_pid=''
+  sync_pgid=''
   set -e
   return "${exit_code}"
 }
@@ -276,14 +394,19 @@ if (( idle_exit != 0 )); then
   fail_controller GPU89_IDLE_QUERY_FAILED "${idle_exit}"
 fi
 
-if ! run_synchronously "${ms_smoke_launcher}" "${controller_root}/ms_smoke.log"; then
+if ! run_synchronously "${ms_smoke_launcher}" \
+    "${controller_root}/ms_smoke.log" ms_smoke; then
   fail_controller MS_SMOKE_FAILED 20
 fi
 
 rtk date --iso-8601=seconds >"${controller_root}/ms_started_at"
-rtk bash "${ms_formal_launcher}" >"${controller_root}/ms_formal.log" 2>&1 &
-ms_pid=$!
+if ! start_managed_job "${ms_formal_launcher}" \
+    "${controller_root}/ms_formal.log" ms ms_pid ms_pgid; then
+  fail_controller MS_SESSION_START_FAILED 24
+fi
 rtk printf '%s\n' "${ms_pid}" >"${controller_root}/ms_wrapper.pid"
+rtk printf '%s\n' "${ms_pgid}" >"${controller_root}/ms_process_group.pgid"
+rtk printf '%s\n' "${ms_pgid}" >"${controller_root}/ms_session_leader.pid"
 rtk echo 'Waiting for exact resumed scalar gate '"'\"step\": 51446'"'.'
 
 while true; do
@@ -306,6 +429,7 @@ while true; do
     ms_early_exit=$?
     set -e
     ms_pid=''
+    ms_pgid=''
     rtk printf '%s\n' "${ms_early_exit}" >"${controller_root}/ms_exit_code"
     if (( ms_early_exit == 0 )); then
       ms_early_exit=23
@@ -319,14 +443,19 @@ while true; do
 done
 rtk touch "${controller_root}/MS_FIRST_200_STEPS_VALIDATED"
 
-if ! run_synchronously "${ss_smoke_launcher}" "${controller_root}/ss_smoke.log"; then
+if ! run_synchronously "${ss_smoke_launcher}" \
+    "${controller_root}/ss_smoke.log" ss_smoke; then
   fail_controller SS_SMOKE_FAILED 30
 fi
 
 rtk date --iso-8601=seconds >"${controller_root}/ss_started_at"
-rtk bash "${ss_formal_launcher}" >"${controller_root}/ss_formal.log" 2>&1 &
-ss_pid=$!
+if ! start_managed_job "${ss_formal_launcher}" \
+    "${controller_root}/ss_formal.log" ss ss_pid ss_pgid; then
+  fail_controller SS_SESSION_START_FAILED 31
+fi
 rtk printf '%s\n' "${ss_pid}" >"${controller_root}/ss_wrapper.pid"
+rtk printf '%s\n' "${ss_pgid}" >"${controller_root}/ss_process_group.pgid"
+rtk printf '%s\n' "${ss_pgid}" >"${controller_root}/ss_session_leader.pid"
 
 while child_is_running "${ms_pid}" || child_is_running "${ss_pid}"; do
   if at_deadline; then
@@ -339,9 +468,11 @@ set +e
 wait "${ms_pid}"
 ms_exit=$?
 ms_pid=''
+ms_pgid=''
 wait "${ss_pid}"
 ss_exit=$?
 ss_pid=''
+ss_pgid=''
 set -e
 rtk printf '%s\n' "${ms_exit}" >"${controller_root}/ms_exit_code"
 rtk printf '%s\n' "${ss_exit}" >"${controller_root}/ss_exit_code"
@@ -376,12 +507,14 @@ fi
 # Post-evaluation launchers self-gate on the remaining window. Evaluation skips
 # or failures are recorded but never turn successful bounded training into a lie.
 if (( ss_exit == 0 )) && [[ -s "${secondary_work_dir}/epoch_12.pth" && -e "${secondary_work_dir}/COMPLETE" && ! -e "${secondary_work_dir}/epoch_13.pth" ]]; then
-  if ! run_synchronously "${ss_posteval_launcher}" "${controller_root}/ss_posteval.log"; then
+  if ! run_synchronously "${ss_posteval_launcher}" \
+      "${controller_root}/ss_posteval.log" ss_posteval; then
     rtk touch "${controller_root}/SS_POSTEVAL_FAILED"
   fi
 fi
 if (( ms_exit == 0 )) && [[ -s "${primary_work_dir}/epoch_8.pth" && -e "${primary_work_dir}/COMPLETE" && ! -e "${primary_work_dir}/epoch_9.pth" ]]; then
-  if ! run_synchronously "${ms_posteval_launcher}" "${controller_root}/ms_posteval.log"; then
+  if ! run_synchronously "${ms_posteval_launcher}" \
+      "${controller_root}/ms_posteval.log" ms_posteval; then
     rtk touch "${controller_root}/MS_POSTEVAL_FAILED"
   fi
 fi

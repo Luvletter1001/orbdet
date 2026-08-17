@@ -123,6 +123,11 @@ def test_controller_orders_primary_before_secondary_and_never_overreaches():
     assert 'wait "${ss_pid}"' in text
     assert 'jobs -pr' in text
     assert 'kill -0' not in text
+    assert 'setsid --wait' in text
+    assert 'ms_session_leader.pid' in text
+    assert 'ss_session_leader.pid' in text
+    assert 'kill -TERM -- "-${pgid}"' in text
+    assert 'kill -TERM "${pid}"' not in text
     assert text.index('ss_posteval_launcher') < text.index(
         'ms_posteval_launcher')
     assert 'tmux' not in text
