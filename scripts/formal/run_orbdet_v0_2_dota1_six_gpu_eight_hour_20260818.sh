@@ -22,6 +22,9 @@ ss_pid=''
 ss_pgid=''
 sync_pid=''
 sync_pgid=''
+ss_exit=0
+ss_exit_captured=0
+ss_stopped_for_priority=0
 controller_active=0
 
 at_deadline() {
@@ -283,19 +286,105 @@ for path in work_dir.rglob('scalars.json') if work_dir.exists() else ():
             records.append(record)
 
 gate_step = 51446
-if not any(record['step'] == gate_step for record in records):
+try:
+    gate_record = next(
+        record for record in records if record['step'] == gate_step)
+except StopIteration:
     raise SystemExit(10)
-latest = max(records, key=lambda record: record['step'])
 for name in ('loss', 'grad_norm', 'time'):
-    value = latest.get(name)
+    value = gate_record.get(name)
     if isinstance(value, bool) or not isinstance(value, (int, float)):
-        print(f'latest scalar {name} is missing or non-numeric', file=sys.stderr)
+        print(f'gate scalar {name} is missing or non-numeric', file=sys.stderr)
         raise SystemExit(11)
     if not math.isfinite(float(value)):
-        print(f'latest scalar {name} is non-finite: {value}', file=sys.stderr)
+        print(f'gate scalar {name} is non-finite: {value}', file=sys.stderr)
         raise SystemExit(12)
-print(f"validated exact gate step {gate_step}; latest step {latest['step']}")
+print(f'validated exact gate step {gate_step}')
 PY
+}
+
+measure_primary_time_median() {
+  rtk env PYTHONNOUSERSITE=1 "${python_bin}" - "${primary_work_dir}" <<'PY'
+import json
+import math
+import pathlib
+import statistics
+import sys
+
+work_dir = pathlib.Path(sys.argv[1])
+priority_time_threshold = 0.341
+samples = []
+for path in work_dir.rglob('scalars.json') if work_dir.exists() else ():
+    try:
+        lines = path.read_text(encoding='utf-8', errors='replace').splitlines()
+    except OSError:
+        continue
+    for line in lines:
+        try:
+            record = json.loads(line)
+        except (TypeError, ValueError):
+            continue
+        step = record.get('step') if isinstance(record, dict) else None
+        value = record.get('time') if isinstance(record, dict) else None
+        if (isinstance(step, int) and not isinstance(step, bool) and
+                step >= 51446 and isinstance(value, (int, float)) and
+                not isinstance(value, bool) and math.isfinite(float(value)) and
+                float(value) > 0.0):
+            samples.append((step, float(value)))
+samples.sort(key=lambda item: item[0])
+recent_stable_samples = [value for _, value in samples[-20:]]
+if len(recent_stable_samples) < 5:
+    raise SystemExit(10)
+median_time = statistics.median(recent_stable_samples)
+print(f'{median_time:.9f}')
+raise SystemExit(20 if median_time > priority_time_threshold else 0)
+PY
+}
+
+latest_complete_ss_checkpoint() {
+  rtk env PYTHONNOUSERSITE=1 "${python_bin}" - "${secondary_work_dir}" <<'PY'
+import pathlib
+import re
+import sys
+import zipfile
+
+work_dir = pathlib.Path(sys.argv[1])
+complete = []
+for path in work_dir.glob('epoch_*.pth') if work_dir.exists() else ():
+    match = re.fullmatch(r'epoch_(\d+)\.pth', path.name)
+    if match is None or not path.is_file() or path.stat().st_size == 0:
+        continue
+    try:
+        with zipfile.ZipFile(path) as archive:
+            if not archive.namelist():
+                continue
+    except (OSError, zipfile.BadZipFile):
+        continue
+    complete.append((int(match.group(1)), path))
+if not complete:
+    raise SystemExit(10)
+epoch, path = max(complete, key=lambda item: item[0])
+print(f'{epoch}\t{path}')
+PY
+}
+
+stop_secondary_for_primary_priority() {
+  local boundary_checkpoint=$1
+  if ! signal_owned_group "${ss_pid}" "${ss_pgid}"; then
+    return 1
+  fi
+  wait_for_owned_group_shutdown "${ss_pgid}"
+  set +e
+  wait "${ss_pid}"
+  ss_exit=$?
+  set -e
+  ss_pid=''
+  ss_pgid=''
+  ss_exit_captured=1
+  ss_stopped_for_priority=1
+  rtk printf '%s\n' "${boundary_checkpoint}" \
+    >"${controller_root}/ss_priority_stop_checkpoint"
+  rtk touch "${controller_root}/SS_STOPPED_FOR_PRIMARY_PRIORITY"
 }
 
 start_managed_job() {
@@ -457,22 +546,100 @@ rtk printf '%s\n' "${ss_pid}" >"${controller_root}/ss_wrapper.pid"
 rtk printf '%s\n' "${ss_pgid}" >"${controller_root}/ss_process_group.pgid"
 rtk printf '%s\n' "${ss_pgid}" >"${controller_root}/ss_session_leader.pid"
 
+priority_breach_count=0
+priority_stop_requested=0
+priority_stop_baseline_epoch=0
+priority_poll_seconds=30
+next_priority_poll="$(rtk date +%s)"
+ss_observed_epoch=0
+ss_checkpoint_landed_at=0
+ss_latest_checkpoint=NONE
 while child_is_running "${ms_pid}" || child_is_running "${ss_pid}"; do
   if at_deadline; then
     fail_controller TIME_LIMIT_REACHED 124 INTERRUPTED
+  fi
+  now_epoch="$(rtk date +%s)"
+
+  checkpoint_info=''
+  set +e
+  checkpoint_info="$(latest_complete_ss_checkpoint)"
+  checkpoint_exit=$?
+  set -e
+  if (( checkpoint_exit == 0 )); then
+    checkpoint_epoch="${checkpoint_info%%$'\t'*}"
+    checkpoint_path="${checkpoint_info#*$'\t'}"
+    if (( checkpoint_epoch > ss_observed_epoch )); then
+      ss_observed_epoch=${checkpoint_epoch}
+      ss_latest_checkpoint=${checkpoint_path}
+      ss_checkpoint_landed_at=${now_epoch}
+    fi
+  elif (( checkpoint_exit != 10 )); then
+    fail_controller SS_CHECKPOINT_SCAN_FAILED 41
+  fi
+
+  if (( priority_stop_requested == 1 &&
+        ss_observed_epoch > priority_stop_baseline_epoch )) && \
+      child_is_running "${ms_pid}" && child_is_running "${ss_pid}"; then
+    if ! stop_secondary_for_primary_priority "${ss_latest_checkpoint}"; then
+      fail_controller SS_PRIORITY_STOP_FAILED 42
+    fi
+  fi
+
+  if (( priority_stop_requested == 0 && now_epoch >= next_priority_poll )) && \
+      child_is_running "${ms_pid}" && child_is_running "${ss_pid}"; then
+    primary_time_median=''
+    set +e
+    primary_time_median="$(measure_primary_time_median)"
+    median_exit=$?
+    set -e
+    next_priority_poll=$(( now_epoch + priority_poll_seconds ))
+    if [[ -n "${primary_time_median}" ]]; then
+      rtk printf '%s\n' "${primary_time_median}" \
+        >"${controller_root}/primary_recent_time_median"
+    fi
+    if (( median_exit == 20 )); then
+      priority_breach_count=$(( priority_breach_count + 1 ))
+    elif (( median_exit == 0 || median_exit == 10 )); then
+      priority_breach_count=0
+    else
+      fail_controller MS_PRIORITY_SCALAR_SCAN_FAILED 43
+    fi
+    rtk printf '%s\n' "${priority_breach_count}" \
+      >"${controller_root}/primary_priority_breach_count"
+
+    if (( priority_breach_count >= 3 )); then
+      priority_stop_requested=1
+      priority_stop_baseline_epoch=${ss_observed_epoch}
+      rtk touch "${controller_root}/SS_STOP_REQUESTED"
+      rtk printf '%s\n' "${ss_latest_checkpoint}" \
+        >"${controller_root}/ss_stop_requested_checkpoint"
+      if (( ss_observed_epoch > 0 &&
+            now_epoch - ss_checkpoint_landed_at <= priority_poll_seconds )) && \
+          child_is_running "${ms_pid}" && child_is_running "${ss_pid}"; then
+        if ! stop_secondary_for_primary_priority \
+            "${ss_latest_checkpoint}"; then
+          fail_controller SS_PRIORITY_STOP_FAILED 42
+        fi
+      fi
+    fi
   fi
   rtk sleep 5
 done
 
 set +e
-wait "${ms_pid}"
-ms_exit=$?
-ms_pid=''
-ms_pgid=''
-wait "${ss_pid}"
-ss_exit=$?
-ss_pid=''
-ss_pgid=''
+if [[ -n "${ms_pid}" ]]; then
+  wait "${ms_pid}"
+  ms_exit=$?
+  ms_pid=''
+  ms_pgid=''
+fi
+if (( ss_exit_captured == 0 )) && [[ -n "${ss_pid}" ]]; then
+  wait "${ss_pid}"
+  ss_exit=$?
+  ss_pid=''
+  ss_pgid=''
+  ss_exit_captured=1
+fi
 set -e
 rtk printf '%s\n' "${ms_exit}" >"${controller_root}/ms_exit_code"
 rtk printf '%s\n' "${ss_exit}" >"${controller_root}/ss_exit_code"
@@ -520,10 +687,14 @@ if (( ms_exit == 0 )) && [[ -s "${primary_work_dir}/epoch_8.pth" && -e "${primar
 fi
 
 if (( training_failed != 0 )); then
-  if at_deadline || (( training_interrupted != 0 )); then
+  if at_deadline; then
     rtk touch "${controller_root}/TIME_LIMIT_REACHED"
     mark_status INTERRUPTED
     exit 124
+  fi
+  if (( training_interrupted != 0 )); then
+    mark_status INTERRUPTED
+    exit 130
   fi
   mark_status FAILED
   exit 40

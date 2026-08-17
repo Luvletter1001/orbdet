@@ -144,6 +144,9 @@ def test_controller_orders_primary_before_secondary_and_never_overreaches():
         assert launcher in text
     assert '51446' in text
     assert 'math.isfinite' in text
+    assert 'gate_record = next(' in text
+    assert "record['step'] == gate_step" in text
+    assert "gate_record.get(name)" in text
     assert 'loss' in text
     assert 'grad_norm' in text
     assert 'time' in text
@@ -156,6 +159,14 @@ def test_controller_orders_primary_before_secondary_and_never_overreaches():
     assert 'ss_session_leader.pid' in text
     assert 'kill -TERM -- "-${pgid}"' in text
     assert 'kill -TERM "${pid}"' not in text
+    assert 'priority_time_threshold = 0.341' in text
+    assert 'statistics.median' in text
+    assert 'priority_breach_count' in text
+    assert 'priority_breach_count >= 3' in text
+    assert 'SS_STOP_REQUESTED' in text
+    assert 'latest_complete_ss_checkpoint' in text
+    assert 'SS_STOPPED_FOR_PRIMARY_PRIORITY' in text
+    assert 'signal_owned_group "${ss_pid}" "${ss_pgid}"' in text
     assert text.index('ss_posteval_launcher') < text.index(
         'ms_posteval_launcher')
     assert 'tmux' not in text
