@@ -9,24 +9,57 @@ work_dir=/data1/zcy/Orbdet/work_dirs/smoke/orbdet_v0_2_dota1_ms_rr_gpu4567_resum
 source_checkpoint=/data1/zcy/Orbdet/work_dirs/formal/orbdet_v0_2_r50_dota1_ms_rr_gpu4567_seed3407_stage1_3e_20260816/epoch_3.pth
 source_sha256=7847a8991984a87ae1545a1a04f26490bcfe16213603615c24a19a299740996b
 deadline='2026-08-18 08:20:00 +0800'
+launch_lock="${work_dir}.launch_lock"
+launch_lock_held=0
+
+release_launch_lock() {
+  if (( launch_lock_held == 1 )); then
+    if ! rtk rmdir "${launch_lock}"; then
+      rtk echo "Could not remove empty launch lock: ${launch_lock}" >&2
+    fi
+    launch_lock_held=0
+  fi
+}
+mark_failed() {
+  rtk mkdir -p "${work_dir}"
+  if [[ -e "${work_dir}/RUNNING" ]]; then
+    rtk mv "${work_dir}/RUNNING" "${work_dir}/FAILED"
+  else
+    rtk touch "${work_dir}/FAILED"
+  fi
+}
+mark_interrupted() {
+  rtk mkdir -p "${work_dir}"
+  if [[ -e "${work_dir}/RUNNING" ]]; then
+    rtk mv "${work_dir}/RUNNING" "${work_dir}/INTERRUPTED"
+  else
+    rtk touch "${work_dir}/INTERRUPTED"
+  fi
+}
 
 on_error() {
   exit_code=$?
   trap - ERR INT TERM
-  rtk mkdir -p "${work_dir}"
-  rtk touch "${work_dir}/FAILED"
+  mark_failed
   rtk echo "MS+RR resume smoke failed with exit ${exit_code}." >&2
   exit "${exit_code}"
 }
 on_signal() {
   trap - ERR INT TERM
-  rtk mkdir -p "${work_dir}"
-  rtk touch "${work_dir}/INTERRUPTED"
+  mark_interrupted
   rtk echo 'MS+RR resume smoke interrupted.' >&2
   exit 130
 }
 trap on_error ERR
 trap on_signal INT TERM
+trap release_launch_lock EXIT
+
+rtk mkdir -p "$(rtk dirname "${work_dir}")"
+if ! rtk mkdir "${launch_lock}"; then
+  rtk echo "Launch lock already exists: ${launch_lock}" >&2
+  exit 9
+fi
+launch_lock_held=1
 
 deadline_epoch="$(rtk date -d "${deadline}" +%s)"
 now_epoch="$(rtk date +%s)"
@@ -75,21 +108,33 @@ rtk timeout --foreground --signal=TERM --kill-after=30s "${remaining_seconds}s" 
   --launcher=pytorch --work-dir="${work_dir}" --resume="${source_checkpoint}"
 train_exit=$?
 set -e
-if [[ ${train_exit} -eq 124 || ${train_exit} -eq 137 || ${train_exit} -eq 143 ]]; then
+if [[ ${train_exit} -eq 124 ]]; then
   trap - ERR INT TERM
-  rtk touch "${work_dir}/INTERRUPTED"
+  mark_interrupted
   rtk echo 'MS+RR resume smoke reached the deadline.' >&2
   exit "${train_exit}"
 fi
+if [[ ${train_exit} -eq 137 || ${train_exit} -eq 143 ]]; then
+  trap - ERR INT TERM
+  mark_interrupted
+  rtk echo "MS+RR resume smoke was interrupted with exit ${train_exit}." >&2
+  exit "${train_exit}"
+fi
 if [[ ${train_exit} -ne 0 ]]; then
+  trap - ERR INT TERM
+  mark_failed
+  rtk echo "MS+RR resume smoke training failed with exit ${train_exit}." >&2
   exit "${train_exit}"
 fi
 if [[ ! -s "${work_dir}/epoch_4.pth" || -e "${work_dir}/epoch_5.pth" ]]; then
+  trap - ERR INT TERM
+  mark_failed
   rtk echo 'MS+RR resume smoke checkpoint boundary was not respected.' >&2
   exit 8
 fi
 rtk env PYTHONNOUSERSITE=1 "${python_bin}" "${checkpoint_validator}" \
   "${work_dir}/epoch_4.pth" --expected-epoch 4 --expected-iter 51248 \
-  --config-token OrbdetV02Detector --config-token trainval_ms_full
+  --expected-state-tensors 371 --config-token OrbdetV02Detector \
+  --config-token trainval_ms_full
 rtk mv "${work_dir}/RUNNING" "${work_dir}/COMPLETE"
 rtk echo 'MS+RR resume smoke completed through epoch 4.'
