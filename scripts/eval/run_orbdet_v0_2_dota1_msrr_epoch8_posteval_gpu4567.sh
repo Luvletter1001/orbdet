@@ -12,6 +12,7 @@ checkpoint=/data1/zcy/Orbdet/work_dirs/formal/orbdet_v0_2_dota1_ms_rr_gpu4567_se
 eval_root=/data1/zcy/Orbdet/work_dirs/eval/orbdet_v0_2_dota1_ms_rr_gpu4567_epoch8_20260818
 status_dir="${eval_root}/status"
 lock_path=/data1/zcy/Orbdet/work_dirs/.gpu_4_5_6_7.launch_lock
+launch_lock_held=0
 
 trainval_config="${repo_root}/configs/orbdet/orbdet_v0_2_r50_dota1_ms_rr_gpu4567_stage1_epoch3_trainval_eval.py"
 ss_config="${repo_root}/configs/orbdet/orbdet_v0_2_r50_dota1_ms_rr_gpu4567_stage1_epoch3_ss_test_submission.py"
@@ -25,6 +26,15 @@ ss_zip="${ss_prefix}/orbdet_v0_2_msrr_epoch8_ss_task1.zip"
 ms_zip="${ms_prefix}/orbdet_v0_2_msrr_epoch8_msrr_task1.zip"
 
 rtk mkdir -p "${status_dir}"
+
+release_launch_lock() {
+  if (( launch_lock_held == 1 )); then
+    if ! rtk rmdir "${lock_path}"; then
+      rtk echo "Could not remove empty launch lock: ${lock_path}" >&2
+    fi
+    launch_lock_held=0
+  fi
+}
 
 on_error() {
   exit_code=$?
@@ -40,6 +50,7 @@ on_signal() {
 }
 trap on_error ERR
 trap on_signal INT TERM
+trap release_launch_lock EXIT
 
 skip_if_insufficient_window() {
   local now_epoch remaining_seconds
@@ -83,12 +94,11 @@ validate_zip() {
   rtk unzip -t "${zip_path}"
 }
 
-skip_if_insufficient_window
-exec 9>"${lock_path}"
-if ! rtk flock -n 9; then
+if ! rtk mkdir "${lock_path}"; then
   rtk echo "GPU group 4,5,6,7 launch lock is held: ${lock_path}" >&2
   exit 3
 fi
+launch_lock_held=1
 skip_if_insufficient_window
 
 if [[ ! -e "${stage_root}/COMPLETE" || ! -s "${checkpoint}" ]]; then

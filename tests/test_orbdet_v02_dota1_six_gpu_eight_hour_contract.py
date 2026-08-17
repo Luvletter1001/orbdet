@@ -137,7 +137,9 @@ def test_bounded_posteval_launchers_pin_resources_validate_contracts_and_outputs
                 'MINIMUM_EVAL_SECONDS:-1500',
                 'POSTEVAL_SKIPPED_INSUFFICIENT_WINDOW', checkpoint, gpu,
                 ranks, lock, 'NCCL_P2P_DISABLE=1', 'NCCL_IB_DISABLE=1',
-                'flock', 'nvidia-smi -i', '--expected-state-tensors 371',
+                'launch_lock_held=0', 'rtk mkdir "${lock_path}"',
+                'rtk rmdir "${lock_path}"', 'trap release_launch_lock EXIT',
+                'nvidia-smi -i', '--expected-state-tensors 371',
                 'checkpoint_contract.json', 'archive.testzip() is None',
                 'len(actual) == 15', 'COMPLETE', 'timeout --signal=INT',
                 *ports, *validator, *configs, *markers):
@@ -147,3 +149,4 @@ def test_bounded_posteval_launchers_pin_resources_validate_contracts_and_outputs
         assert 'tools/train.py' not in text
         assert '--resume' not in text
         assert 'rm -' not in text
+        assert 'flock' not in text
