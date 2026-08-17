@@ -17,11 +17,11 @@ ms_posteval_launcher="${repo_root}/scripts/eval/run_orbdet_v0_2_dota1_msrr_epoch
 
 deadline_epoch="$(rtk date -d "${deadline}" +%s)"
 ms_pid=''
-ms_pgid=''
+ms_sid=''
 ss_pid=''
-ss_pgid=''
+ss_sid=''
 sync_pid=''
-sync_pgid=''
+sync_sid=''
 ss_exit=0
 ss_exit_captured=0
 ss_stopped_for_priority=0
@@ -55,94 +55,152 @@ child_is_running() {
 
 owned_session_is_verified() {
   local wrapper_pid=$1
-  local pgid=$2
+  local owned_sid=$2
   local process_row
   local leader_pid
   local parent_pid
   local actual_pgid
   local session_id
-  [[ "${wrapper_pid}" =~ ^[0-9]+$ && "${pgid}" =~ ^[0-9]+$ ]] || return 1
+  local controller_sid
+  [[ "${wrapper_pid}" =~ ^[0-9]+$ && "${owned_sid}" =~ ^[0-9]+$ ]] || return 1
   child_is_running "${wrapper_pid}" || return 1
-  process_row="$(rtk ps -o pid=,ppid=,pgid=,sid= -p "${pgid}")"
+  controller_sid="$(rtk ps -o sid= -p "$$")"
+  controller_sid="${controller_sid//[[:space:]]/}"
+  [[ "${owned_sid}" != "${controller_sid}" ]] || return 1
+  process_row="$(rtk ps -o pid=,ppid=,pgid=,sid= -p "${owned_sid}")"
   read -r leader_pid parent_pid actual_pgid session_id <<<"${process_row}"
-  [[ "${leader_pid}" == "${pgid}" &&
+  [[ "${leader_pid}" == "${owned_sid}" &&
      "${parent_pid}" == "${wrapper_pid}" &&
-     "${actual_pgid}" == "${pgid}" &&
-     "${session_id}" == "${pgid}" ]]
+     "${actual_pgid}" == "${owned_sid}" &&
+     "${session_id}" == "${owned_sid}" ]]
 }
 
-owned_group_has_members() {
-  local pgid=$1
-  rtk ps -eo pgid= | rtk awk -v target="${pgid}" \
-    '$1 == target { found = 1 } END { exit !found }'
+session_has_members() {
+  local owned_sid=$1
+  [[ "${owned_sid}" =~ ^[0-9]+$ ]] || return 1
+  rtk ps --sid "${owned_sid}" -o pid=,sid= 2>/dev/null | \
+    rtk awk -v sid="${owned_sid}" \
+    '$1 ~ /^[0-9]+$/ && $2 == sid { found = 1 } END { exit !found }'
 }
 
-signal_owned_group() {
-  local wrapper_pid=$1
-  local pgid=$2
-  if ! owned_session_is_verified "${wrapper_pid}" "${pgid}"; then
-    return 1
-  fi
-  rtk kill -TERM -- "-${pgid}" 2>/dev/null || true
+owned_session_pgids() {
+  local owned_sid=$1
+  rtk ps --sid "${owned_sid}" -o pid=,sid=,pgid= 2>/dev/null | \
+    rtk awk -v sid="${owned_sid}" \
+    '$1 ~ /^[0-9]+$/ && $2 == sid && $3 ~ /^[0-9]+$/ { print $3 }' | \
+    rtk sort -n -u
 }
 
-wait_for_owned_group_shutdown() {
-  local pgid=$1
+owned_pgid_is_in_session() {
+  local owned_sid=$1
+  local owned_pgid=$2
+  rtk ps --sid "${owned_sid}" -o sid=,pgid= 2>/dev/null | \
+    rtk awk -v sid="${owned_sid}" \
+    -v pgid="${owned_pgid}" '
+      $2 == pgid { found = 1; if ($1 != sid) foreign = 1 }
+      END { exit !(found && !foreign) }'
+}
+
+signal_owned_session() {
+  local owned_sid=$1
+  local signal_name=$2
+  local owned_pgid
+  local pgids
+  pgids="$(owned_session_pgids "${owned_sid}")"
+  while IFS= read -r owned_pgid; do
+    [[ "${owned_pgid}" =~ ^[0-9]+$ ]] || continue
+    if owned_pgid_is_in_session "${owned_sid}" "${owned_pgid}"; then
+      case "${signal_name}" in
+        TERM)
+          rtk kill -TERM -- "-${owned_pgid}" 2>/dev/null || true
+          ;;
+        KILL)
+          rtk kill -KILL -- "-${owned_pgid}" 2>/dev/null || true
+          ;;
+        *)
+          return 2
+          ;;
+      esac
+    fi
+  done <<<"${pgids}"
+}
+
+wait_for_owned_session_shutdown() {
+  local owned_sid=$1
   local sample
   for sample in {1..30}; do
-    if ! owned_group_has_members "${pgid}"; then
+    if ! session_has_members "${owned_sid}"; then
       return 0
     fi
+    signal_owned_session "${owned_sid}" TERM
     rtk sleep 1
   done
-  if owned_group_has_members "${pgid}"; then
-    rtk kill -KILL -- "-${pgid}" 2>/dev/null || true
+  signal_owned_session "${owned_sid}" KILL
+  for sample in {1..100}; do
+    if ! session_has_members "${owned_sid}"; then
+      return 0
+    fi
+    rtk sleep 0.1
+  done
+  return 1
+}
+
+terminate_owned_session() {
+  local wrapper_pid=$1
+  local owned_sid=$2
+  if ! owned_session_is_verified "${wrapper_pid}" "${owned_sid}"; then
+    if [[ "${owned_sid}" =~ ^[0-9]+$ ]] && \
+        ! session_has_members "${owned_sid}"; then
+      return 0
+    fi
+    return 1
   fi
+  signal_owned_session "${owned_sid}" TERM
+  wait_for_owned_session_shutdown "${owned_sid}"
 }
 
 terminate_owned_children() {
-  local ms_group_owned=0
-  local ss_group_owned=0
-  local sync_group_owned=0
-  if signal_owned_group "${ms_pid}" "${ms_pgid}"; then
-    ms_group_owned=1
+  local cleanup_failed=0
+  if [[ -n "${ms_pid}" ]] && \
+      ! terminate_owned_session "${ms_pid}" "${ms_sid}"; then
+    cleanup_failed=1
   fi
-  if signal_owned_group "${ss_pid}" "${ss_pgid}"; then
-    ss_group_owned=1
+  if [[ -n "${ss_pid}" ]] && \
+      ! terminate_owned_session "${ss_pid}" "${ss_sid}"; then
+    cleanup_failed=1
   fi
-  if signal_owned_group "${sync_pid}" "${sync_pgid}"; then
-    sync_group_owned=1
+  if [[ -n "${sync_pid}" ]] && \
+      ! terminate_owned_session "${sync_pid}" "${sync_sid}"; then
+    cleanup_failed=1
   fi
-  if (( ms_group_owned == 1 )); then
-    wait_for_owned_group_shutdown "${ms_pgid}"
-  fi
-  if (( ss_group_owned == 1 )); then
-    wait_for_owned_group_shutdown "${ss_pgid}"
-  fi
-  if (( sync_group_owned == 1 )); then
-    wait_for_owned_group_shutdown "${sync_pgid}"
+  if (( cleanup_failed != 0 )); then
+    return 1
   fi
   if [[ -n "${ms_pid}" ]]; then
     wait "${ms_pid}" 2>/dev/null || true
     ms_pid=''
-    ms_pgid=''
+    ms_sid=''
   fi
   if [[ -n "${ss_pid}" ]]; then
     wait "${ss_pid}" 2>/dev/null || true
     ss_pid=''
-    ss_pgid=''
+    ss_sid=''
   fi
   if [[ -n "${sync_pid}" ]]; then
     wait "${sync_pid}" 2>/dev/null || true
     sync_pid=''
-    sync_pgid=''
+    sync_sid=''
   fi
+  return 0
 }
 
 on_error() {
   local exit_code=$?
   trap - ERR INT TERM
-  terminate_owned_children
+  if ! terminate_owned_children; then
+    rtk echo 'Owned session cleanup failed; refusing a terminal receipt.' >&2
+    exit 125
+  fi
   if at_deadline; then
     rtk touch "${controller_root}/TIME_LIMIT_REACHED"
     mark_status INTERRUPTED
@@ -155,7 +213,10 @@ on_error() {
 
 on_signal() {
   trap - ERR INT TERM
-  terminate_owned_children
+  if ! terminate_owned_children; then
+    rtk echo 'Owned session cleanup failed; refusing a terminal receipt.' >&2
+    exit 125
+  fi
   if at_deadline; then
     rtk touch "${controller_root}/TIME_LIMIT_REACHED"
   fi
@@ -169,7 +230,10 @@ fail_controller() {
   local exit_code=$2
   local status=${3:-FAILED}
   trap - ERR INT TERM
-  terminate_owned_children
+  if ! terminate_owned_children; then
+    rtk echo 'Owned session cleanup failed; refusing a terminal receipt.' >&2
+    exit 125
+  fi
   rtk touch "${controller_root}/${marker}"
   if at_deadline; then
     rtk touch "${controller_root}/TIME_LIMIT_REACHED"
@@ -370,16 +434,15 @@ PY
 
 stop_secondary_for_primary_priority() {
   local boundary_checkpoint=$1
-  if ! signal_owned_group "${ss_pid}" "${ss_pgid}"; then
+  if ! terminate_owned_session "${ss_pid}" "${ss_sid}"; then
     return 1
   fi
-  wait_for_owned_group_shutdown "${ss_pgid}"
   set +e
   wait "${ss_pid}"
   ss_exit=$?
   set -e
   ss_pid=''
-  ss_pgid=''
+  ss_sid=''
   ss_exit_captured=1
   ss_stopped_for_priority=1
   rtk printf '%s\n' "${boundary_checkpoint}" \
@@ -392,10 +455,10 @@ start_managed_job() {
   local log_path=$2
   local label=$3
   local pid_variable=$4
-  local pgid_variable=$5
-  local ready_path="${controller_root}/${label}_process_group.pgid"
+  local sid_variable=$5
+  local ready_path="${controller_root}/${label}_session.sid"
   local wrapper_pid
-  local pgid=''
+  local owned_sid=''
   local sample
 
   rtk setsid --wait rtk bash -c '
@@ -410,7 +473,7 @@ start_managed_job() {
       rtk echo "Could not establish a dedicated owned process group." >&2
       exit 70
     fi
-    rtk printf "%s\n" "${pgid}" >"${ready_path}"
+    rtk printf "%s\n" "${session_id}" >"${ready_path}"
     exec rtk bash "${launcher}"
   ' owned-session "${ready_path}" "${launcher}" >"${log_path}" 2>&1 &
   wrapper_pid=$!
@@ -418,7 +481,7 @@ start_managed_job() {
 
   for sample in {1..50}; do
     if [[ -s "${ready_path}" ]]; then
-      pgid="$(rtk sed -n '1p' "${ready_path}")"
+      owned_sid="$(rtk sed -n '1p' "${ready_path}")"
       break
     fi
     if ! child_is_running "${wrapper_pid}"; then
@@ -426,9 +489,9 @@ start_managed_job() {
     fi
     rtk sleep 0.1
   done
-  printf -v "${pgid_variable}" '%s' "${pgid}"
-  if ! owned_session_is_verified "${wrapper_pid}" "${pgid}"; then
-    rtk echo "Could not verify owned process group for ${label}." >&2
+  printf -v "${sid_variable}" '%s' "${owned_sid}"
+  if ! owned_session_is_verified "${wrapper_pid}" "${owned_sid}"; then
+    rtk echo "Could not verify owned session for ${label}." >&2
     return 71
   fi
 }
@@ -439,17 +502,24 @@ run_synchronously() {
   local label=$3
   local exit_code
   if ! start_managed_job "${launcher}" "${log_path}" "${label}" \
-      sync_pid sync_pgid; then
+      sync_pid sync_sid; then
     return 71
   fi
   set +e
   wait "${sync_pid}"
   exit_code=$?
   sync_pid=''
-  sync_pgid=''
+  sync_sid=''
   set -e
   return "${exit_code}"
 }
+
+if [[ "${ORBDET_CONTROLLER_LIBRARY_ONLY:-0}" == 1 ]]; then
+  if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
+    return 0
+  fi
+  exit 0
+fi
 
 rtk mkdir -p "$(rtk dirname "${controller_root}")"
 if [[ -e "${controller_root}" ]]; then
@@ -490,12 +560,12 @@ fi
 
 rtk date --iso-8601=seconds >"${controller_root}/ms_started_at"
 if ! start_managed_job "${ms_formal_launcher}" \
-    "${controller_root}/ms_formal.log" ms ms_pid ms_pgid; then
+    "${controller_root}/ms_formal.log" ms ms_pid ms_sid; then
   fail_controller MS_SESSION_START_FAILED 24
 fi
 rtk printf '%s\n' "${ms_pid}" >"${controller_root}/ms_wrapper.pid"
-rtk printf '%s\n' "${ms_pgid}" >"${controller_root}/ms_process_group.pgid"
-rtk printf '%s\n' "${ms_pgid}" >"${controller_root}/ms_session_leader.pid"
+rtk printf '%s\n' "${ms_sid}" >"${controller_root}/ms_session.sid"
+rtk printf '%s\n' "${ms_sid}" >"${controller_root}/ms_session_leader.pid"
 rtk echo 'Waiting for exact resumed scalar gate '"'\"step\": 51446'"'.'
 
 while true; do
@@ -518,7 +588,7 @@ while true; do
     ms_early_exit=$?
     set -e
     ms_pid=''
-    ms_pgid=''
+    ms_sid=''
     rtk printf '%s\n' "${ms_early_exit}" >"${controller_root}/ms_exit_code"
     if (( ms_early_exit == 0 )); then
       ms_early_exit=23
@@ -539,12 +609,12 @@ fi
 
 rtk date --iso-8601=seconds >"${controller_root}/ss_started_at"
 if ! start_managed_job "${ss_formal_launcher}" \
-    "${controller_root}/ss_formal.log" ss ss_pid ss_pgid; then
+    "${controller_root}/ss_formal.log" ss ss_pid ss_sid; then
   fail_controller SS_SESSION_START_FAILED 31
 fi
 rtk printf '%s\n' "${ss_pid}" >"${controller_root}/ss_wrapper.pid"
-rtk printf '%s\n' "${ss_pgid}" >"${controller_root}/ss_process_group.pgid"
-rtk printf '%s\n' "${ss_pgid}" >"${controller_root}/ss_session_leader.pid"
+rtk printf '%s\n' "${ss_sid}" >"${controller_root}/ss_session.sid"
+rtk printf '%s\n' "${ss_sid}" >"${controller_root}/ss_session_leader.pid"
 
 priority_breach_count=0
 priority_stop_requested=0
@@ -621,13 +691,13 @@ if [[ -n "${ms_pid}" ]]; then
   wait "${ms_pid}"
   ms_exit=$?
   ms_pid=''
-  ms_pgid=''
+  ms_sid=''
 fi
 if (( ss_exit_captured == 0 )) && [[ -n "${ss_pid}" ]]; then
   wait "${ss_pid}"
   ss_exit=$?
   ss_pid=''
-  ss_pgid=''
+  ss_sid=''
   ss_exit_captured=1
 fi
 set -e

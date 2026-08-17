@@ -1,4 +1,5 @@
 from pathlib import Path
+import subprocess
 
 from mmengine.config import Config
 
@@ -157,7 +158,11 @@ def test_controller_orders_primary_before_secondary_and_never_overreaches():
     assert 'setsid --wait' in text
     assert 'ms_session_leader.pid' in text
     assert 'ss_session_leader.pid' in text
-    assert 'kill -TERM -- "-${pgid}"' in text
+    assert 'ORBDET_CONTROLLER_LIBRARY_ONLY' in text
+    assert 'ps --sid "${owned_sid}" -o pid=,sid=,pgid=' in text
+    assert 'terminate_owned_session "${ss_pid}" "${ss_sid}"' in text
+    assert text.count('if ! terminate_owned_children; then') == 3
+    assert 'kill -TERM -- "-${owned_pgid}"' in text
     assert 'kill -TERM "${pid}"' not in text
     assert 'priority_time_threshold = 0.341' in text
     assert 'statistics.median' in text
@@ -168,12 +173,66 @@ def test_controller_orders_primary_before_secondary_and_never_overreaches():
     assert 'SS_STOP_REQUESTED' in text
     assert 'latest_complete_ss_checkpoint' in text
     assert 'SS_STOPPED_FOR_PRIMARY_PRIORITY' in text
-    assert 'signal_owned_group "${ss_pid}" "${ss_pgid}"' in text
+    assert 'signal_owned_group' not in text
     assert text.index('ss_posteval_launcher') < text.index(
         'ms_posteval_launcher')
     assert 'tmux' not in text
     assert 'nohup' not in text
     assert 'rm -' not in text
+
+
+def test_controller_terminates_every_process_group_in_owned_session(tmp_path):
+    controller = (
+        SCRIPTS / 'formal/' /
+        'run_orbdet_v0_2_dota1_six_gpu_eight_hour_20260818.sh')
+    text = controller.read_text()
+    # Fail safely before spawning anything if library-only sourcing is absent.
+    assert 'ORBDET_CONTROLLER_LIBRARY_ONLY' in text
+    launcher = tmp_path / 'nested_timeout.sh'
+    launcher.write_text(
+        '#!/usr/bin/env bash\n'
+        'set -euo pipefail\n'
+        'rtk timeout 60s rtk sleep 60\n')
+    launcher.chmod(0o755)
+    harness = r'''
+set -euo pipefail
+ORBDET_CONTROLLER_LIBRARY_ONLY=1
+source "$1"
+controller_root=$2
+rtk mkdir -p "${controller_root}"
+topology_pid=''
+topology_sid=''
+cleanup() {
+  if [[ -n "${topology_pid}" && -n "${topology_sid}" ]]; then
+    terminate_owned_session "${topology_pid}" "${topology_sid}" || true
+    wait "${topology_pid}" 2>/dev/null || true
+  fi
+}
+trap cleanup EXIT
+start_managed_job "$3" "${controller_root}/topology.log" topology \
+  topology_pid topology_sid
+rtk sleep 1
+group_count="$(rtk ps --sid "${topology_sid}" -o sid=,pgid= | \
+  rtk awk -v sid="${topology_sid}" \
+  '$1 == sid { groups[$2] = 1 } END { print length(groups) }')"
+if (( group_count < 2 )); then
+  rtk echo 'Nested timeout did not create the required second process group.' >&2
+  exit 91
+fi
+terminate_owned_session "${topology_pid}" "${topology_sid}"
+wait "${topology_pid}" 2>/dev/null || true
+topology_pid=''
+if session_has_members "${topology_sid}"; then
+  rtk echo 'A process survived in the owned session.' >&2
+  exit 92
+fi
+trap - EXIT
+'''
+    result = subprocess.run(
+        ['bash', '-c', harness, 'topology-test', str(controller),
+         str(tmp_path / 'controller'), str(launcher)],
+        capture_output=True, text=True, timeout=20, check=False)
+    assert result.returncode == 0, result.stderr
 
 
 def test_bounded_posteval_launchers_pin_resources_validate_contracts_and_outputs():
