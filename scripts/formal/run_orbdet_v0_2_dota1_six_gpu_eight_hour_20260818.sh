@@ -330,7 +330,7 @@ rtk printf '%s\n' "${ss_pid}" >"${controller_root}/ss_wrapper.pid"
 
 while child_is_running "${ms_pid}" || child_is_running "${ss_pid}"; do
   if at_deadline; then
-    rtk touch "${controller_root}/TIME_LIMIT_REACHED"
+    fail_controller TIME_LIMIT_REACHED 124 INTERRUPTED
   fi
   rtk sleep 5
 done

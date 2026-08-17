@@ -102,6 +102,8 @@ def test_controller_orders_primary_before_secondary_and_never_overreaches():
     assert 'epoch_9.pth' in text
     assert 'epoch_13.pth' in text
     assert 'TIME_LIMIT_REACHED' in text
+    assert text.count(
+        'fail_controller TIME_LIMIT_REACHED 124 INTERRUPTED') >= 2
     required_launchers = (
         'run_orbdet_v0_2_dota1_msrr_resume_e3_to_e4_gpu4567_smoke.sh',
         'run_orbdet_v0_2_dota1_msrr_resume_e3_to_e8_gpu4567.sh',
