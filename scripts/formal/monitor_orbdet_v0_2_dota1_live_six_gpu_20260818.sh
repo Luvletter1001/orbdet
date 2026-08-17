@@ -6,12 +6,28 @@ ORBDET_CONTROLLER_LIBRARY_ONLY=1
 source "${controller_helper}"
 unset ORBDET_CONTROLLER_LIBRARY_ONLY
 
+read_process_starttime() {
+  local process_pid=$1
+  local stat_line stat_tail starttime_ticks
+  local -a stat_fields=()
+  [[ "${process_pid}" =~ ^[0-9]+$ &&
+     -r "/proc/${process_pid}/stat" ]] || return 1
+  IFS= read -r stat_line <"/proc/${process_pid}/stat" || return 1
+  stat_tail="${stat_line##*) }"
+  read -r -a stat_fields <<<"${stat_tail}"
+  (( ${#stat_fields[@]} >= 20 )) || return 1
+  starttime_ticks="${stat_fields[19]}"
+  [[ "${starttime_ticks}" =~ ^[0-9]+$ ]] || return 1
+  rtk printf '%s\n' "${starttime_ticks}"
+}
+
 validate_registered_leader() {
   local expected_pid=$1
   local registered_sid=$2
   local expected_command=$3
+  local expected_starttime=$4
   local process_row leader_pid actual_pgid actual_sid executable_basename
-  local current_monitor_sid
+  local current_monitor_sid actual_starttime
   local -a process_argv=()
 
   [[ "${expected_pid}" =~ ^[0-9]+$ && "${registered_sid}" =~ ^[0-9]+$ ]] || return 1
@@ -31,7 +47,10 @@ validate_registered_leader() {
   executable_basename="$(rtk basename "${process_argv[0]}")"
   [[ "${executable_basename}" == bash &&
      "${process_argv[1]}" == -c &&
-     "${process_argv[2]}" == "${expected_command}" ]]
+     "${process_argv[2]}" == "${expected_command}" ]] || return 1
+  actual_starttime="$(read_process_starttime "${expected_pid}")" || return 1
+  [[ "${expected_starttime}" =~ ^[0-9]+$ &&
+     "${actual_starttime}" == "${expected_starttime}" ]]
 }
 
 update_priority_observation() {
@@ -75,8 +94,10 @@ ss_posteval_status=/data1/zcy/Orbdet/work_dirs/eval/orbdet_v0_2_dota1_ss_gpu89_s
 
 ms_pane_pid=''
 ms_sid=''
+ms_starttime=''
 ss_pane_pid=''
 ss_sid=''
+ss_starttime=''
 ms_scalars_path=''
 ss_scalars_path=''
 monitor_sid="$(rtk ps -o sid= -p "$$")"
@@ -137,8 +158,9 @@ attach_tmux_session() {
   local expected_command=$3
   local pid_variable=$4
   local sid_variable=$5
+  local starttime_variable=$6
   local panes pane_count pane_pid process_row
-  local leader_pid actual_pgid actual_sid
+  local leader_pid actual_pgid actual_sid starttime_ticks
 
   rtk tmux has-session -t "=${session_name}"
   panes="$(rtk tmux list-panes -t "=${session_name}" -F '#{pane_id}')"
@@ -151,7 +173,9 @@ attach_tmux_session() {
   [[ "${pane_pid}" =~ ^[0-9]+$ ]] || return 21
   process_row="$(rtk ps -o pid=,pgid=,sid= -p "${pane_pid}")"
   read -r leader_pid actual_pgid actual_sid <<<"${process_row}"
-  if ! validate_registered_leader "${pane_pid}" "${actual_sid}" "${expected_command}"; then
+  starttime_ticks="$(read_process_starttime "${pane_pid}")" || return 22
+  if ! validate_registered_leader "${pane_pid}" "${actual_sid}" \
+      "${expected_command}" "${starttime_ticks}"; then
     rtk echo "Untrusted process topology for ${session_name}." >&2
     return 22
   fi
@@ -161,9 +185,10 @@ attach_tmux_session() {
   fi
   printf -v "${pid_variable}" '%s' "${pane_pid}"
   printf -v "${sid_variable}" '%s' "${actual_sid}"
+  printf -v "${starttime_variable}" '%s' "${starttime_ticks}"
   atomic_write "${monitor_root}/${label}_attachment" \
-    "session=${session_name} pane_pid=${pane_pid} sid=${actual_sid} argv0=bash argv1=-c command=${expected_command}"
-  append_log "ATTACHED ${label} pane_pid=${pane_pid} sid=${actual_sid} exact_command=${expected_command}"
+    "session=${session_name} pane_pid=${pane_pid} sid=${actual_sid} starttime_ticks=${starttime_ticks} argv0=bash argv1=-c command=${expected_command}"
+  append_log "ATTACHED ${label} pane_pid=${pane_pid} sid=${actual_sid} starttime_ticks=${starttime_ticks} exact_command=${expected_command}"
 }
 
 verify_live_registration() {
@@ -171,10 +196,12 @@ verify_live_registration() {
   local pane_pid=$2
   local registered_sid=$3
   local expected_command=$4
+  local expected_starttime=$5
   if ! session_has_members "${registered_sid}"; then
     return 10
   fi
-  if ! validate_registered_leader "${pane_pid}" "${registered_sid}" "${expected_command}"; then
+  if ! validate_registered_leader "${pane_pid}" "${registered_sid}" \
+      "${expected_command}" "${expected_starttime}"; then
     record_fatal_condition "${label}_LIVE_TOPOLOGY_INVALID" \
       "registered SID ${registered_sid} still has members but its leader/token changed"
     return 11
@@ -232,7 +259,11 @@ import sys
 
 path = pathlib.Path(sys.argv[1])
 steps = []
-for line in path.read_text(encoding='utf-8', errors='replace').splitlines():
+raw = path.read_bytes()
+if not raw.endswith(b'\n'):
+    newline = raw.rfind(b'\n')
+    raw = raw[:newline + 1] if newline >= 0 else b''
+for line in raw.decode('utf-8', errors='replace').splitlines():
     try:
         record = json.loads(line)
     except (TypeError, ValueError):
@@ -241,8 +272,7 @@ for line in path.read_text(encoding='utf-8', errors='replace').splitlines():
     if isinstance(step, int) and not isinstance(step, bool):
         steps.append(step)
 if not steps:
-    print(f'bound scalar file has no integer steps: {path}', file=sys.stderr)
-    raise SystemExit(12)
+    raise SystemExit(10)
 print(max(steps))
 PY
 }
@@ -259,11 +289,15 @@ path = pathlib.Path(sys.argv[1])
 if not path.is_file():
     raise SystemExit(10)
 try:
-    lines = [line for line in path.read_text(
-        encoding='utf-8', errors='replace').splitlines() if line.strip()]
+    raw = path.read_bytes()
 except OSError as error:
     print(error, file=sys.stderr)
     raise SystemExit(11)
+if not raw.endswith(b'\n'):
+    newline = raw.rfind(b'\n')
+    raw = raw[:newline + 1] if newline >= 0 else b''
+lines = [line for line in raw.decode(
+    'utf-8', errors='replace').splitlines() if line.strip()]
 if not lines:
     raise SystemExit(10)
 try:
@@ -307,9 +341,13 @@ for path in root.rglob('*') if root.exists() else ():
     if not path.is_file() or path.suffix not in {'.log', '.json'}:
         continue
     try:
-        content = path.read_text(encoding='utf-8', errors='replace')
+        raw = path.read_bytes()
     except OSError:
         continue
+    if path.suffix == '.json' and not raw.endswith(b'\n'):
+        newline = raw.rfind(b'\n')
+        raw = raw[:newline + 1] if newline >= 0 else b''
+    content = raw.decode('utf-8', errors='replace')
     patterns = log_patterns + ((json_nonfinite,) if path.suffix == '.json' else ())
     for pattern in patterns:
         if pattern.search(content):
@@ -364,10 +402,14 @@ path = pathlib.Path(sys.argv[1])
 recent_limit = int(sys.argv[2])
 records = []
 try:
-    lines = path.read_text(encoding='utf-8', errors='replace').splitlines()
+    raw = path.read_bytes()
 except OSError as error:
     print(error, file=sys.stderr)
     raise SystemExit(11)
+if not raw.endswith(b'\n'):
+    newline = raw.rfind(b'\n')
+    raw = raw[:newline + 1] if newline >= 0 else b''
+lines = raw.decode('utf-8', errors='replace').splitlines()
 for line in lines:
     try:
         record = json.loads(line)
@@ -420,11 +462,12 @@ terminate_registered_sid() {
   local registered_pid=$2
   local registered_sid=$3
   local expected_command=$4
+  local expected_starttime=$5
   if ! session_has_members "${registered_sid}"; then
     return 0
   fi
   if ! validate_registered_leader "${registered_pid}" "${registered_sid}" \
-      "${expected_command}"; then
+      "${expected_command}" "${expected_starttime}"; then
     rtk touch "${monitor_root}/${label}_DEADLINE_LEADER_UNVERIFIED"
     append_log "SIGNAL_REFUSED ${label} exact argv validation failed for registered_sid=${registered_sid}"
     return 72
@@ -447,13 +490,13 @@ handle_deadline() {
   rtk touch "${monitor_root}/TIME_LIMIT_REACHED"
   if [[ -n "${ms_sid}" ]]; then
     if ! terminate_registered_sid MS "${ms_pane_pid}" "${ms_sid}" \
-        "${ms_expected_command}"; then
+        "${ms_expected_command}" "${ms_starttime}"; then
       termination_failed=1
     fi
   fi
   if [[ -n "${ss_sid}" ]]; then
     if ! terminate_registered_sid SS "${ss_pane_pid}" "${ss_sid}" \
-        "${ss_expected_command}"; then
+        "${ss_expected_command}" "${ss_starttime}"; then
       termination_failed=1
     fi
   fi
@@ -635,7 +678,7 @@ poll_primary_priority() {
       latest_ss_epoch="${checkpoint_info%%$'\t'*}"
       if (( latest_ss_epoch > priority_stop_baseline_epoch )); then
         if ! verify_live_registration SS "${ss_pane_pid}" "${ss_sid}" \
-            "${ss_expected_command}"; then
+            "${ss_expected_command}" "${ss_starttime}"; then
           record_fatal_condition SS_PRIORITY_STOP_REFUSED \
             'SS leader was not the registered launcher at the strict checkpoint boundary'
           return
@@ -738,16 +781,29 @@ monitor_active=1
 trap on_error ERR
 trap on_signal INT TERM
 
-attach_tmux_session MS "${ms_session}" "${ms_expected_command}" ms_pane_pid ms_sid
-attach_tmux_session SS "${ss_session}" "${ss_expected_command}" ss_pane_pid ss_sid
+attach_tmux_session MS "${ms_session}" "${ms_expected_command}" \
+  ms_pane_pid ms_sid ms_starttime
+attach_tmux_session SS "${ss_session}" "${ss_expected_command}" \
+  ss_pane_pid ss_sid ss_starttime
 [[ "${ms_sid}" != "${ss_sid}" ]]
 ms_scalars_path="$(bind_current_scalars_path "${ms_workdir}")"
 ss_scalars_path="$(bind_current_scalars_path "${ss_workdir}")"
+set +e
 last_priority_step="$(latest_scalar_step "${ms_scalars_path}")"
+initial_step_exit=$?
+set -e
+if (( initial_step_exit == 10 )); then
+  last_priority_step=-1
+elif (( initial_step_exit != 0 )); then
+  rtk echo 'Could not establish the initial MS scalar watermark.' >&2
+  false
+fi
 atomic_write "${monitor_root}/MS_scalars_binding" "${ms_scalars_path}"
 atomic_write "${monitor_root}/SS_scalars_binding" "${ss_scalars_path}"
 atomic_write "${monitor_root}/last_priority_step" "${last_priority_step}"
 atomic_write "${monitor_root}/registered_sids" "MS=${ms_sid} SS=${ss_sid}"
+atomic_write "${monitor_root}/registered_starttimes" \
+  "MS=${ms_starttime} SS=${ss_starttime}"
 append_log "START deadline=${deadline} monitor_sid=${monitor_sid}"
 
 while true; do
@@ -758,7 +814,7 @@ while true; do
   if [[ "${ms_outcome}" == RUNNING ]]; then
     set +e
     verify_live_registration MS "${ms_pane_pid}" "${ms_sid}" \
-      "${ms_expected_command}"
+      "${ms_expected_command}" "${ms_starttime}"
     ms_live_exit=$?
     set -e
     if (( ms_live_exit == 0 )); then
@@ -769,7 +825,7 @@ while true; do
   if [[ "${ss_outcome}" == RUNNING ]]; then
     set +e
     verify_live_registration SS "${ss_pane_pid}" "${ss_sid}" \
-      "${ss_expected_command}"
+      "${ss_expected_command}" "${ss_starttime}"
     ss_live_exit=$?
     set -e
     if (( ss_live_exit == 0 )); then

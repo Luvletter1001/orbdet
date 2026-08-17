@@ -70,6 +70,11 @@ def test_monitor_is_strict_attach_only_and_fail_closed():
     assert 'rtk basename "${process_argv[0]}"' in text
     assert '"${process_argv[1]}" == -c' in text
     assert '"${process_argv[2]}" == "${expected_command}"' in text
+    assert '/proc/${process_pid}/stat' in text
+    assert 'starttime_ticks' in text
+    assert 'ms_starttime' in text
+    assert 'ss_starttime' in text
+    assert 'registered_starttimes' in text
     assert '*"${launcher_token}"*' not in text
     assert 'Refusing to overwrite existing monitor state' in text
     assert 'rtk mkdir "${monitor_root}"' in text
@@ -133,7 +138,8 @@ def test_exact_proc_argv_accepts_only_declared_bash_c_command(tmp_path):
 set -euo pipefail
 ORBDET_LIVE_MONITOR_LIBRARY_ONLY=1
 source "$1"
-validate_registered_leader "$2" "$2" "$3"
+starttime_ticks="$(read_process_starttime "$2")"
+validate_registered_leader "$2" "$2" "$3" "${starttime_ticks}"
 '''
     refusal_harness = r'''
 set -euo pipefail
@@ -142,8 +148,27 @@ source "$1"
 declare -F terminate_registered_sid >/dev/null
 monitor_root=$4
 rtk mkdir -p "${monitor_root}"
-if terminate_registered_sid TEST "$2" "$2" "$3"; then
+starttime_ticks="$(read_process_starttime "$2")"
+if terminate_registered_sid TEST "$2" "$2" "$3" \
+    "${starttime_ticks}"; then
   exit 91
+fi
+session_has_members "$2"
+'''
+    mismatch_harness = r'''
+set -euo pipefail
+ORBDET_LIVE_MONITOR_LIBRARY_ONLY=1
+source "$1"
+monitor_root=$4
+rtk mkdir -p "${monitor_root}"
+starttime_ticks="$(read_process_starttime "$2")"
+wrong_starttime=$(( starttime_ticks + 1 ))
+if validate_registered_leader "$2" "$2" "$3" "${wrong_starttime}"; then
+  exit 92
+fi
+if terminate_registered_sid TEST "$2" "$2" "$3" \
+    "${wrong_starttime}"; then
+  exit 93
 fi
 session_has_members "$2"
 '''
@@ -169,6 +194,12 @@ session_has_members "$2"
             capture_output=True, text=True, timeout=5, check=False)
         assert refused_signal.returncode == 0, refused_signal.stderr
         assert bad.poll() is None
+        refused_reused_pid = subprocess.run(
+            ['bash', '-c', mismatch_harness, 'birth-test', str(MONITOR),
+             str(good.pid), expected, str(tmp_path / 'birth-refusal')],
+            capture_output=True, text=True, timeout=5, check=False)
+        assert refused_reused_pid.returncode == 0, refused_reused_pid.stderr
+        assert good.poll() is None
     finally:
         for process in (good, bad):
             if process.poll() is None:
@@ -198,6 +229,37 @@ rtk printf '%s %s %s\n' "${same_step_count}" \
         capture_output=True, text=True, timeout=5, check=False)
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == '1 3 102'
+
+
+def test_scalar_reader_ignores_incomplete_json_tail(tmp_path):
+    scalars = tmp_path / 'scalars.json'
+    scalars.write_bytes(
+        b'{"epoch": 4, "step": 101, "loss": 1.25, '
+        b'"grad_norm": 2.5, "time": 0.31}\n'
+        b'{"epoch": 4, "step": 102, "loss":')
+    only_fragment = tmp_path / 'only_fragment.json'
+    only_fragment.write_bytes(b'{"epoch": 1, "loss":')
+    harness = r'''
+set -euo pipefail
+ORBDET_LIVE_MONITOR_LIBRARY_ONLY=1
+source "$1"
+read_latest_scalars "$2"
+set +e
+read_latest_scalars "$3" >/dev/null 2>&1
+fragment_exit=$?
+latest_scalar_step "$3" >/dev/null 2>&1
+step_exit=$?
+set -e
+[[ "${fragment_exit}" == 10 ]]
+[[ "${step_exit}" == 10 ]]
+'''
+    result = subprocess.run(
+        ['bash', '-c', harness, 'scalar-tail-test', str(MONITOR),
+         str(scalars), str(only_fragment)], capture_output=True, text=True,
+        timeout=5, check=False)
+    assert result.returncode == 0, result.stderr
+    assert 'epoch=4' in result.stdout
+    assert 'iter=101' in result.stdout
 
 
 def test_monitor_verifies_exact_training_and_posteval_contracts():
