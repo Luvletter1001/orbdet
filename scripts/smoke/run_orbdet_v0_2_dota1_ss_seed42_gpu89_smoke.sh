@@ -7,7 +7,7 @@ checkpoint_validator="${repo_root}/tools/analysis_tools/validate_checkpoint_cont
 config="${repo_root}/configs/orbdet/orbdet_v0_2_r50_dota1_ss_seed42_gpu89_smoke.py"
 work_dir=/data1/zcy/Orbdet/work_dirs/smoke/orbdet_v0_2_dota1_ss_gpu89_seed42_20260818
 deadline='2026-08-18 08:20:00 +0800'
-launch_lock="${work_dir}.launch_lock"
+launch_lock=/data1/zcy/Orbdet/work_dirs/.gpu_8_9.launch_lock
 launch_lock_held=0
 
 release_launch_lock() {

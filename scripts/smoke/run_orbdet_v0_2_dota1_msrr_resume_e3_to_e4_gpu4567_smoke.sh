@@ -9,7 +9,7 @@ work_dir=/data1/zcy/Orbdet/work_dirs/smoke/orbdet_v0_2_dota1_ms_rr_gpu4567_resum
 source_checkpoint=/data1/zcy/Orbdet/work_dirs/formal/orbdet_v0_2_r50_dota1_ms_rr_gpu4567_seed3407_stage1_3e_20260816/epoch_3.pth
 source_sha256=7847a8991984a87ae1545a1a04f26490bcfe16213603615c24a19a299740996b
 deadline='2026-08-18 08:20:00 +0800'
-launch_lock="${work_dir}.launch_lock"
+launch_lock=/data1/zcy/Orbdet/work_dirs/.gpu_4_5_6_7.launch_lock
 launch_lock_held=0
 
 release_launch_lock() {
