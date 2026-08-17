@@ -13,6 +13,12 @@ SS_BASE = CFG / 'orbdet_v0_2_r50_dota1_1x_gpu89.py'
 SS42 = CFG / 'orbdet_v0_2_r50_dota1_ss_seed42_gpu89.py'
 SS42_SMOKE = CFG / 'orbdet_v0_2_r50_dota1_ss_seed42_gpu89_smoke.py'
 DEADLINE = '2026-08-18 08:20:00 +0800'
+MS_POSTEVAL = (
+    SCRIPTS / 'eval/' /
+    'run_orbdet_v0_2_dota1_msrr_epoch8_posteval_gpu4567.sh')
+SS_POSTEVAL = (
+    SCRIPTS / 'eval/' /
+    'run_orbdet_v0_2_dota1_ss_seed42_epoch12_posteval_gpu89.sh')
 
 
 def test_ms_resume_preserves_global_batch_and_targets_epoch8():
@@ -96,3 +102,48 @@ def test_controller_orders_primary_before_secondary_and_never_overreaches():
     assert 'epoch_9.pth' in text
     assert 'TIME_LIMIT_REACHED' in text
     assert 'rm -' not in text
+
+
+def test_bounded_posteval_launchers_pin_resources_validate_contracts_and_outputs():
+    cases = (
+        (MS_POSTEVAL,
+         '/data1/zcy/Orbdet/work_dirs/formal/orbdet_v0_2_dota1_ms_rr_gpu4567_seed3407_resume_e3_to_e8_20260818/epoch_8.pth',
+         'CUDA_VISIBLE_DEVICES=4,5,6,7', '--nproc_per_node=4',
+         ('--master_port=29674', '--master_port=29675', '--master_port=29676'),
+         '/data1/zcy/Orbdet/work_dirs/.gpu_4_5_6_7.launch_lock',
+         ('--expected-epoch 8', '--expected-iter 136656',
+          '--config-token OrbdetV02Detector',
+          '--config-token trainval_ms_full'),
+         ('orbdet_v0_2_r50_dota1_ms_rr_gpu4567_stage1_epoch3_trainval_eval.py',
+          'orbdet_v0_2_r50_dota1_ms_rr_gpu4567_stage1_epoch3_ss_test_submission.py',
+          'orbdet_v0_2_r50_dota1_ms_rr_gpu4567_stage1_epoch3_ms_test_submission.py'),
+         ('TRAINVAL_COMPLETE', 'SS_SUBMISSION_COMPLETE',
+          'MS_SUBMISSION_COMPLETE')),
+        (SS_POSTEVAL,
+         '/data1/zcy/Orbdet/work_dirs/formal/orbdet_v0_2_dota1_ss_gpu89_seed42_20260818/epoch_12.pth',
+         'CUDA_VISIBLE_DEVICES=8,9', '--nproc_per_node=2',
+         ('--master_port=29677', '--master_port=29678'),
+         '/data1/zcy/Orbdet/work_dirs/.gpu_8_9.launch_lock',
+         ('--expected-epoch 12', '--expected-iter 38280',
+          '--config-token OrbdetV02Detector', '--config-token randomness'),
+         ('orbdet_v0_2_r50_dota1_epoch12_trainval_eval_gpu89.py',
+          'orbdet_v0_2_r50_dota1_epoch12_test_submission_gpu89.py'),
+         ('TRAINVAL_COMPLETE', 'SS_SUBMISSION_COMPLETE')),
+    )
+    for path, checkpoint, gpu, ranks, ports, lock, validator, configs, markers in cases:
+        text = path.read_text()
+        for required in (
+                'set -euo pipefail', DEADLINE,
+                'MINIMUM_EVAL_SECONDS:-1500',
+                'POSTEVAL_SKIPPED_INSUFFICIENT_WINDOW', checkpoint, gpu,
+                ranks, lock, 'NCCL_P2P_DISABLE=1', 'NCCL_IB_DISABLE=1',
+                'flock', 'nvidia-smi -i', '--expected-state-tensors 371',
+                'checkpoint_contract.json', 'archive.testzip() is None',
+                'len(actual) == 15', 'COMPLETE', 'timeout --signal=INT',
+                *ports, *validator, *configs, *markers):
+            assert required in text, required
+        assert [text.index(name) for name in configs] == sorted(
+            text.index(name) for name in configs)
+        assert 'tools/train.py' not in text
+        assert '--resume' not in text
+        assert 'rm -' not in text
