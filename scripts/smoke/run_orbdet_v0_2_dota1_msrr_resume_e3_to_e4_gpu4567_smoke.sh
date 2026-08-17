@@ -62,9 +62,7 @@ fi
 launch_lock_held=1
 
 deadline_epoch="$(rtk date -d "${deadline}" +%s)"
-now_epoch="$(rtk date +%s)"
-remaining_seconds=$(( deadline_epoch - now_epoch ))
-if (( remaining_seconds <= 0 )); then
+if (( deadline_epoch - $(rtk date +%s) <= 0 )); then
   rtk echo "Deadline has passed: ${deadline}" >&2
   exit 2
 fi
@@ -97,9 +95,14 @@ if (( ${#existing_checkpoints[@]} > 0 )) || [[ -e "${work_dir}/RUNNING" || -e "$
 fi
 
 rtk mkdir -p "${work_dir}"
+remaining_seconds=$(( deadline_epoch - $(rtk date +%s) ))
+if (( remaining_seconds <= 0 )); then
+  rtk echo "Deadline has passed: ${deadline}" >&2
+  exit 2
+fi
 rtk touch "${work_dir}/RUNNING"
 set +e
-rtk timeout --foreground --signal=TERM --kill-after=30s "${remaining_seconds}s" \
+rtk timeout --signal=TERM --kill-after=30s "${remaining_seconds}s" \
   rtk env PYTHONNOUSERSITE=1 PYTHONPATH="${repo_root}" \
   MPLCONFIGDIR=/tmp/zcy-codex/mplconfig OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
   CUDA_VISIBLE_DEVICES=4,5,6,7 NCCL_P2P_DISABLE=1 NCCL_IB_DISABLE=1 \

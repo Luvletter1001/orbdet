@@ -19,6 +19,16 @@ MS_POSTEVAL = (
 SS_POSTEVAL = (
     SCRIPTS / 'eval/' /
     'run_orbdet_v0_2_dota1_ss_seed42_epoch12_posteval_gpu89.sh')
+TRAIN_LAUNCHERS = (
+    SCRIPTS / 'smoke/' /
+    'run_orbdet_v0_2_dota1_msrr_resume_e3_to_e4_gpu4567_smoke.sh',
+    SCRIPTS / 'smoke/' /
+    'run_orbdet_v0_2_dota1_ss_seed42_gpu89_smoke.sh',
+    SCRIPTS / 'formal/' /
+    'run_orbdet_v0_2_dota1_msrr_resume_e3_to_e8_gpu4567.sh',
+    SCRIPTS / 'formal/' /
+    'run_orbdet_v0_2_dota1_ss_seed42_gpu89.sh',
+)
 
 
 def test_ms_resume_preserves_global_batch_and_targets_epoch8():
@@ -88,6 +98,24 @@ def test_launchers_pin_resources_resume_and_deadline():
             assert resume in text
         else:
             assert resume not in text
+
+
+def test_training_deadline_is_refreshed_immediately_before_group_timeout():
+    refresh = 'remaining_seconds=$(( deadline_epoch - $(rtk date +%s) ))'
+    timeout = (
+        'rtk timeout --signal=TERM --kill-after=30s '
+        '"${remaining_seconds}s"')
+    for path in TRAIN_LAUNCHERS:
+        text = path.read_text()
+        assert '--foreground' not in text
+        assert text.count(refresh) == 1
+        assert text.count(timeout) == 1
+        refresh_index = text.index(refresh)
+        timeout_index = text.index(timeout)
+        assert refresh_index > text.index('existing_checkpoints=')
+        assert refresh_index > text.index('gpu_processes=')
+        assert refresh_index < text.index('rtk touch "${work_dir}/RUNNING"')
+        assert 0 < timeout_index - refresh_index < 500
 
 
 def test_controller_orders_primary_before_secondary_and_never_overreaches():
