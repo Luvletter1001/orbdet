@@ -20,6 +20,7 @@ from mmdet.structures.bbox import BaseBoxes
 from mmrotate.evaluation.functional.scqo_diagnostics import (
     match_rotated_predictions, periodic_angle_error)
 from mmrotate.registry import MODELS
+from mmrotate.structures import RotatedBoxes
 from mmrotate.utils import register_all_modules
 
 MANIFEST_SCHEMA_VERSION = 1
@@ -84,6 +85,11 @@ def _box_tensor(boxes) -> torch.Tensor:
     if tensor.ndim != 2 or tensor.shape[1] != 5:
         raise ValueError('rotated boxes must have shape [N, 5]')
     return tensor
+
+
+def _regularize_le90(boxes: torch.Tensor) -> torch.Tensor:
+    """Return a long-edge canonical copy without mutating source boxes."""
+    return RotatedBoxes(boxes.clone()).regularize_boxes('le90')
 
 
 def _config_field(value, key: str):
@@ -413,12 +419,14 @@ def _match_by_gt(pred, gt_boxes, gt_labels, score_threshold: float,
         gt_labels,
         score_threshold=score_threshold,
         iou_threshold=iou_threshold)
+    canonical_pred_boxes = _regularize_le90(pred_boxes)
+    canonical_gt_boxes = _regularize_le90(gt_boxes)
     result = {}
     for offset in range(matches['gt_index'].numel()):
         gt_index = int(matches['gt_index'][offset])
         pred_index = int(matches['pred_index'][offset])
-        pred_angle = pred_boxes[pred_index, 4]
-        gt_angle = gt_boxes[gt_index, 4]
+        pred_angle = canonical_pred_boxes[pred_index, 4]
+        gt_angle = canonical_gt_boxes[gt_index, 4]
         error = periodic_angle_error(pred_angle, gt_angle, period=math.pi)
         error_c4 = periodic_angle_error(
             pred_angle, gt_angle, period=math.pi / 2)

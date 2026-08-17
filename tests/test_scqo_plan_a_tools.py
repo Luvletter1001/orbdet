@@ -578,6 +578,29 @@ def test_collect_rejects_invalid_direct_arguments_before_model_setup(
         collect(args)
 
 
+def test_match_by_gt_regularizes_equivalent_boxes_to_le90():
+    prediction = _instances([[16, 16, 4, 8, 0]], [0], [0.9])
+    ground_truth = _instances([[16, 16, 8, 4, math.pi / 2]], [0])
+    prediction_before = prediction.bboxes.tensor.clone()
+    ground_truth_before = ground_truth.bboxes.tensor.clone()
+
+    matches = collector._match_by_gt(
+        prediction,
+        ground_truth.bboxes,
+        ground_truth.labels,
+        score_threshold=0.05,
+        iou_threshold=0.5)
+
+    match = matches[0]
+    assert float(match['rotated_iou']) == pytest.approx(1.0)
+    assert float(match['angle_error_deg']) == pytest.approx(0.0, abs=1e-5)
+    assert float(match['angle_error_c4_deg']) == pytest.approx(0.0, abs=1e-5)
+    assert float(match['pred_angle']) == pytest.approx(
+        float(match['gt_angle']), abs=1e-5)
+    assert torch.equal(prediction.bboxes.tensor, prediction_before)
+    assert torch.equal(ground_truth.bboxes.tensor, ground_truth_before)
+
+
 def test_collector_runs_frozen_inference_and_preserves_per_image_identity(
         tmp_path, monkeypatch):
     args = _arguments(tmp_path, max_images=2)
