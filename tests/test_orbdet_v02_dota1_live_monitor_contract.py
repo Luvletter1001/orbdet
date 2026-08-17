@@ -57,7 +57,9 @@ def test_monitor_is_strict_attach_only_and_fail_closed():
     assert 'ORBDET_LIVE_MONITOR_LIBRARY_ONLY' in text
     assert 'tmux has-session' in text
     assert text.count('-t "=${session_name}"') == 3
-    assert "'#{pane_pid}'" in text
+    assert 'tmux display-message' not in text
+    assert 'list-panes -t "=${session_name}" -F \'#{pane_pid}\'' in text
+    assert 'pane_pid_count != 1' in text
     assert "'#{pane_id}'" in text
     assert 'pane_count != 1' in text
     assert 'leader_pid' in text

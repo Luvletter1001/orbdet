@@ -159,7 +159,7 @@ attach_tmux_session() {
   local pid_variable=$4
   local sid_variable=$5
   local starttime_variable=$6
-  local panes pane_count pane_pid process_row
+  local panes pane_count pane_pids pane_pid_count pane_pid process_row
   local leader_pid actual_pgid actual_sid starttime_ticks
 
   rtk tmux has-session -t "=${session_name}"
@@ -169,7 +169,14 @@ attach_tmux_session() {
     rtk echo "Expected exactly one pane in ${session_name}; found ${pane_count}." >&2
     return 20
   fi
-  pane_pid="$(rtk tmux display-message -p -t "=${session_name}" '#{pane_pid}')"
+  pane_pids="$(rtk tmux list-panes -t "=${session_name}" -F '#{pane_pid}')"
+  pane_pid_count="$(rtk printf '%s\n' "${pane_pids}" | \
+    rtk awk 'NF { count += 1 } END { print count + 0 }')"
+  if (( pane_pid_count != 1 )); then
+    rtk echo "Expected exactly one pane PID in ${session_name}; found ${pane_pid_count}." >&2
+    return 21
+  fi
+  pane_pid="$(rtk printf '%s\n' "${pane_pids}" | rtk awk 'NF { print; exit }')"
   [[ "${pane_pid}" =~ ^[0-9]+$ ]] || return 21
   process_row="$(rtk ps -o pid=,pgid=,sid= -p "${pane_pid}")"
   read -r leader_pid actual_pgid actual_sid <<<"${process_row}"
