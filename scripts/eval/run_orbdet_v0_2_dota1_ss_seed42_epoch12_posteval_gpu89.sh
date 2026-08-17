@@ -65,8 +65,8 @@ trap release_launch_lock EXIT
 mark_insufficient_window() {
   local phase=$1
   if [[ -e "${status_dir}/RUNNING" ]]; then
-    rtk mv "${status_dir}/RUNNING" "${status_dir}/POSTEVAL_SKIPPED_INSUFFICIENT_WINDOW"
     work_began=0
+    rtk mv "${status_dir}/RUNNING" "${status_dir}/POSTEVAL_SKIPPED_INSUFFICIENT_WINDOW"
   else
     rtk touch "${status_dir}/POSTEVAL_SKIPPED_INSUFFICIENT_WINDOW"
   fi
@@ -156,6 +156,6 @@ skip_if_insufficient_window SS_SUBMISSION
 run_bounded rtk env PYTHONNOUSERSITE=1 PYTHONPATH="${repo_root}" MPLCONFIGDIR=/tmp/zcy-codex/mplconfig OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 CUDA_VISIBLE_DEVICES=8,9 NCCL_P2P_DISABLE=1 NCCL_IB_DISABLE=1 "${python_bin}" -m torch.distributed.launch --nproc_per_node=2 --master_port=29678 "${repo_root}/tools/test.py" "${ss_config}" "${checkpoint}" --launcher=pytorch --cfg-options "work_dir=${ss_work_dir}" "test_evaluator.outfile_prefix=${ss_prefix}"
 validate_zip "${ss_zip}"
 rtk touch "${status_dir}/SS_SUBMISSION_COMPLETE"
-rtk mv "${status_dir}/RUNNING" "${status_dir}/COMPLETE"
 work_began=0
+rtk mv "${status_dir}/RUNNING" "${status_dir}/COMPLETE"
 rtk echo 'Epoch-12 SS trainval and submission post-evaluation completed.'

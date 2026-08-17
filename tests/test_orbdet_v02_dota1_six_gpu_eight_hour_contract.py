@@ -233,3 +233,11 @@ def test_bounded_posteval_launchers_pin_resources_validate_contracts_and_outputs
         assert 'rm -' not in text
         assert 'flock' not in text
         assert 'rtk touch "${status_dir}/COMPLETE"' not in text
+        assert (
+            'work_began=0\n    rtk mv "${status_dir}/RUNNING" '
+            '"${status_dir}/POSTEVAL_SKIPPED_INSUFFICIENT_WINDOW"'
+        ) in text
+        assert (
+            'work_began=0\nrtk mv "${status_dir}/RUNNING" '
+            '"${status_dir}/COMPLETE"'
+        ) in text
