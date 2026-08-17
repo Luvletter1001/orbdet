@@ -1,4 +1,6 @@
 from pathlib import Path
+import os
+import signal
 import subprocess
 import time
 
@@ -28,6 +30,14 @@ MONITOR_ROOT = (
     '/data1/zcy/Orbdet/work_dirs/controllers/'
     'orbdet_dota1_sixgpu_8h_20260818/live_monitor')
 DEADLINE = '2026-08-18 08:20:00 +0800'
+MS_COMMAND = (
+    f'rtk bash {MS_LAUNCHER} > '
+    '/data1/zcy/Orbdet/work_dirs/controllers/'
+    'orbdet_dota1_sixgpu_8h_20260818/ms_formal.log 2>&1')
+SS_COMMAND = (
+    f'rtk bash {SS_LAUNCHER} > '
+    '/data1/zcy/Orbdet/work_dirs/controllers/'
+    'orbdet_dota1_sixgpu_8h_20260818/ss_formal.log 2>&1')
 
 
 def monitor_text():
@@ -39,7 +49,8 @@ def test_monitor_is_strict_attach_only_and_fail_closed():
     assert text.startswith('#!/usr/bin/env bash\nset -euo pipefail\n')
     for exact in (
             CONTROLLER, MS_SESSION, SS_SESSION, MS_LAUNCHER, SS_LAUNCHER,
-            MS_WORKDIR, SS_WORKDIR, MONITOR_ROOT, DEADLINE):
+            MS_WORKDIR, SS_WORKDIR, MONITOR_ROOT, DEADLINE, MS_COMMAND,
+            SS_COMMAND):
         assert exact in text
     assert 'ORBDET_CONTROLLER_LIBRARY_ONLY=1' in text
     assert 'source "${controller_helper}"' in text
@@ -53,6 +64,13 @@ def test_monitor_is_strict_attach_only_and_fail_closed():
     assert 'actual_pgid' in text
     assert 'actual_sid' in text
     assert 'monitor_sid' in text
+    assert '/proc/${expected_pid}/cmdline' in text
+    assert "mapfile -d ''" in text
+    assert '[[ "${#process_argv[@]}" == 3 ]]' in text
+    assert 'rtk basename "${process_argv[0]}"' in text
+    assert '"${process_argv[1]}" == -c' in text
+    assert '"${process_argv[2]}" == "${expected_command}"' in text
+    assert '*"${launcher_token}"*' not in text
     assert 'Refusing to overwrite existing monitor state' in text
     assert 'rtk mkdir "${monitor_root}"' in text
     assert 'rtk touch "${monitor_root}/RUNNING"' in text
@@ -88,6 +106,10 @@ def test_monitor_enforces_primary_priority_at_strict_epoch_boundary():
     for required in (
             'priority_time_threshold=0.341', 'recent_limit=20',
             'statistics.median', 'priority_breach_count >= 3',
+            'ms_scalars_path', 'bind_current_scalars_path',
+            'last_priority_step', 'latest_step > last_priority_step',
+            'priority_observation_advanced',
+            'last_priority_step="$(latest_scalar_step "${ms_scalars_path}")"',
             'SS_STOP_REQUESTED', 'priority_stop_baseline_epoch',
             'latest_ss_epoch > priority_stop_baseline_epoch',
             'signal_owned_session "${ss_sid}" TERM',
@@ -96,6 +118,86 @@ def test_monitor_enforces_primary_priority_at_strict_epoch_boundary():
         assert required in text
     assert text.index('SS_STOP_REQUESTED') < text.index(
         'latest_ss_epoch > priority_stop_baseline_epoch')
+    median_body = text.split('measure_recent_ms_median() {', 1)[1].split(
+        '\n}', 1)[0]
+    assert "root.rglob('scalars.json')" not in median_body
+
+
+def test_exact_proc_argv_accepts_only_declared_bash_c_command(tmp_path):
+    expected = 'rtk timeout 60s rtk sleep 60 & wait'
+    good = subprocess.Popen(
+        ['/usr/bin/bash', '-c', expected], start_new_session=True)
+    bad = subprocess.Popen(
+        ['/usr/bin/bash', '-c', expected, expected], start_new_session=True)
+    harness = r'''
+set -euo pipefail
+ORBDET_LIVE_MONITOR_LIBRARY_ONLY=1
+source "$1"
+validate_registered_leader "$2" "$2" "$3"
+'''
+    refusal_harness = r'''
+set -euo pipefail
+ORBDET_LIVE_MONITOR_LIBRARY_ONLY=1
+source "$1"
+declare -F terminate_registered_sid >/dev/null
+monitor_root=$4
+rtk mkdir -p "${monitor_root}"
+if terminate_registered_sid TEST "$2" "$2" "$3"; then
+  exit 91
+fi
+session_has_members "$2"
+'''
+    try:
+        for process in (good, bad):
+            for _ in range(40):
+                if os.getsid(process.pid) == process.pid:
+                    break
+                time.sleep(0.05)
+        accepted = subprocess.run(
+            ['bash', '-c', harness, 'argv-test', str(MONITOR),
+             str(good.pid), expected], capture_output=True, text=True,
+            timeout=5, check=False)
+        embedded_extra = subprocess.run(
+            ['bash', '-c', harness, 'argv-test', str(MONITOR),
+             str(bad.pid), expected], capture_output=True, text=True,
+            timeout=5, check=False)
+        assert accepted.returncode == 0, accepted.stderr
+        assert embedded_extra.returncode != 0
+        refused_signal = subprocess.run(
+            ['bash', '-c', refusal_harness, 'argv-test', str(MONITOR),
+             str(bad.pid), expected, str(tmp_path / 'refusal')],
+            capture_output=True, text=True, timeout=5, check=False)
+        assert refused_signal.returncode == 0, refused_signal.stderr
+        assert bad.poll() is None
+    finally:
+        for process in (good, bad):
+            if process.poll() is None:
+                os.killpg(process.pid, signal.SIGTERM)
+            process.wait(timeout=5)
+
+
+def test_priority_breaches_require_three_distinct_increasing_steps():
+    harness = r'''
+set -euo pipefail
+ORBDET_LIVE_MONITOR_LIBRARY_ONLY=1
+source "$1"
+priority_time_threshold=0.341
+priority_breach_count=0
+last_priority_step=-1
+update_priority_observation 100 0.400
+update_priority_observation 100 0.400
+update_priority_observation 100 0.400
+same_step_count=${priority_breach_count}
+update_priority_observation 101 0.400
+update_priority_observation 102 0.400
+rtk printf '%s %s %s\n' "${same_step_count}" \
+  "${priority_breach_count}" "${last_priority_step}"
+'''
+    result = subprocess.run(
+        ['bash', '-c', harness, 'priority-test', str(MONITOR)],
+        capture_output=True, text=True, timeout=5, check=False)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == '1 3 102'
 
 
 def test_monitor_verifies_exact_training_and_posteval_contracts():
@@ -165,15 +267,12 @@ rtk setsid --wait rtk bash "$2" &
 topology_pid=$!
 for sample in {1..40}; do
   topology_sid="$(rtk ps -ww --ppid "${topology_pid}" \
-    -o pid=,pgid=,sid=,args:4096= | rtk awk -v token="$3" \
-    '$1 == $2 && $1 == $3 && index($0, token) { print $1; exit }')"
-  if [[ -n "${topology_sid}" ]] && \
-      validate_registered_leader "${topology_sid}" "${topology_sid}" "$3"; then
-    break
-  fi
+    -o pid=,pgid=,sid= | rtk awk \
+    '$1 == $2 && $1 == $3 { print $1; exit }')"
+  [[ -n "${topology_sid}" ]] && break
   rtk sleep 0.05
 done
-validate_registered_leader "${topology_sid}" "${topology_sid}" "$3"
+[[ "${topology_sid}" =~ ^[0-9]+$ ]]
 group_count="$(rtk ps --sid "${topology_sid}" -o sid=,pgid= | \
   rtk awk -v sid="${topology_sid}" \
   '$1 == sid { groups[$2] = 1 } END { print length(groups) }')"
