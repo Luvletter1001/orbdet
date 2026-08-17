@@ -53,12 +53,14 @@ trap on_signal INT TERM
 trap release_launch_lock EXIT
 
 skip_if_insufficient_window() {
+  local phase=$1
   local now_epoch remaining_seconds
   now_epoch="$(rtk date +%s)"
   remaining_seconds=$(( deadline_epoch - now_epoch ))
   if (( remaining_seconds < minimum_eval_seconds )); then
     rtk touch "${status_dir}/POSTEVAL_SKIPPED_INSUFFICIENT_WINDOW"
-    rtk echo "Only ${remaining_seconds}s remain before ${deadline_local}; skipping post-evaluation."
+    rtk touch "${status_dir}/${phase}_SKIPPED_INSUFFICIENT_WINDOW"
+    rtk echo "Only ${remaining_seconds}s remain before ${deadline_local}; skipping ${phase}."
     exit 0
   fi
 }
@@ -89,7 +91,7 @@ validate_zip() {
     return 20
   fi
   rtk env PYTHONNOUSERSITE=1 "${python_bin}" -c \
-    'import sys, zipfile; classes=("plane", "baseball-diamond", "bridge", "ground-track-field", "small-vehicle", "large-vehicle", "ship", "tennis-court", "basketball-court", "storage-tank", "soccer-ball-field", "roundabout", "harbor", "swimming-pool", "helicopter"); expected={"Task1_" + name + ".txt" for name in classes}; archive=zipfile.ZipFile(sys.argv[1]); actual=set(archive.namelist()); assert actual == expected and len(actual) == 15, (actual, expected); assert archive.testzip() is None; print("validated", sys.argv[1], len(actual), "files")' \
+    'import sys, zipfile; classes=("plane", "baseball-diamond", "bridge", "ground-track-field", "small-vehicle", "large-vehicle", "ship", "tennis-court", "basketball-court", "storage-tank", "soccer-ball-field", "roundabout", "harbor", "swimming-pool", "helicopter"); expected={"Task1_" + name + ".txt" for name in classes}; archive=zipfile.ZipFile(sys.argv[1]); names=archive.namelist(); actual=set(names); assert len(names) == 15 and actual == expected, (names, expected); assert archive.testzip() is None; print("validated", sys.argv[1], len(names), "files")' \
     "${zip_path}"
   rtk unzip -t "${zip_path}"
 }
@@ -99,7 +101,14 @@ if ! rtk mkdir "${lock_path}"; then
   exit 3
 fi
 launch_lock_held=1
-skip_if_insufficient_window
+
+existing_status_marker="$(rtk find "${status_dir}" -mindepth 1 -maxdepth 1 -print -quit)"
+if [[ -n "${existing_status_marker}" || -e "${trainval_work_dir}" || \
+      -e "${ss_work_dir}" || -e "${ms_work_dir}" || -e "${ss_prefix}" || \
+      -e "${ms_prefix}" ]]; then
+  rtk echo "Existing post-evaluation output found in ${eval_root}." >&2
+  exit 5
+fi
 
 if [[ ! -e "${stage_root}/COMPLETE" || ! -s "${checkpoint}" ]]; then
   rtk echo 'Epoch-8 training is not COMPLETE; refusing post-evaluation.' >&2
@@ -110,14 +119,7 @@ if [[ -n "${gpu_processes}" ]]; then
   rtk echo 'GPU 4/5/6/7 are not idle; refusing post-evaluation.' >&2
   exit 4
 fi
-if [[ -e "${status_dir}/RUNNING" || -e "${status_dir}/COMPLETE" || \
-      -e "${status_dir}/TRAINVAL_COMPLETE" || -e "${status_dir}/SS_SUBMISSION_COMPLETE" || \
-      -e "${status_dir}/MS_SUBMISSION_COMPLETE" || -e "${trainval_work_dir}" || \
-      -e "${ss_work_dir}" || -e "${ms_work_dir}" || -e "${ss_prefix}" || \
-      -e "${ms_prefix}" ]]; then
-  rtk echo "Existing post-evaluation output found in ${eval_root}." >&2
-  exit 5
-fi
+skip_if_insufficient_window PRECHECK
 
 rtk touch "${status_dir}/RUNNING"
 run_bounded rtk env PYTHONNOUSERSITE=1 "${python_bin}" "${checkpoint_validator}" \
@@ -126,13 +128,16 @@ run_bounded rtk env PYTHONNOUSERSITE=1 "${python_bin}" "${checkpoint_validator}"
   --config-token trainval_ms_full > "${status_dir}/checkpoint_contract.json"
 rtk touch "${status_dir}/CHECKPOINT_VALIDATED"
 
+skip_if_insufficient_window TRAINVAL
 run_bounded rtk env PYTHONNOUSERSITE=1 PYTHONPATH="${repo_root}" MPLCONFIGDIR=/tmp/zcy-codex/mplconfig OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 CUDA_VISIBLE_DEVICES=4,5,6,7 NCCL_P2P_DISABLE=1 NCCL_IB_DISABLE=1 "${python_bin}" -m torch.distributed.launch --nproc_per_node=4 --master_port=29674 "${repo_root}/tools/test.py" "${trainval_config}" "${checkpoint}" --launcher=pytorch --cfg-options "work_dir=${trainval_work_dir}"
 rtk touch "${status_dir}/TRAINVAL_COMPLETE"
 
+skip_if_insufficient_window SS_SUBMISSION
 run_bounded rtk env PYTHONNOUSERSITE=1 PYTHONPATH="${repo_root}" MPLCONFIGDIR=/tmp/zcy-codex/mplconfig OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 CUDA_VISIBLE_DEVICES=4,5,6,7 NCCL_P2P_DISABLE=1 NCCL_IB_DISABLE=1 "${python_bin}" -m torch.distributed.launch --nproc_per_node=4 --master_port=29675 "${repo_root}/tools/test.py" "${ss_config}" "${checkpoint}" --launcher=pytorch --cfg-options "work_dir=${ss_work_dir}" "test_evaluator.outfile_prefix=${ss_prefix}"
 validate_zip "${ss_zip}"
 rtk touch "${status_dir}/SS_SUBMISSION_COMPLETE"
 
+skip_if_insufficient_window MS_SUBMISSION
 run_bounded rtk env PYTHONNOUSERSITE=1 PYTHONPATH="${repo_root}" MPLCONFIGDIR=/tmp/zcy-codex/mplconfig OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 CUDA_VISIBLE_DEVICES=4,5,6,7 NCCL_P2P_DISABLE=1 NCCL_IB_DISABLE=1 "${python_bin}" -m torch.distributed.launch --nproc_per_node=4 --master_port=29676 "${repo_root}/tools/test.py" "${ms_config}" "${checkpoint}" --launcher=pytorch --cfg-options "work_dir=${ms_work_dir}" "test_evaluator.outfile_prefix=${ms_prefix}"
 validate_zip "${ms_zip}"
 rtk touch "${status_dir}/MS_SUBMISSION_COMPLETE"

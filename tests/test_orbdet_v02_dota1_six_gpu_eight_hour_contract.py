@@ -118,7 +118,10 @@ def test_bounded_posteval_launchers_pin_resources_validate_contracts_and_outputs
           'orbdet_v0_2_r50_dota1_ms_rr_gpu4567_stage1_epoch3_ss_test_submission.py',
           'orbdet_v0_2_r50_dota1_ms_rr_gpu4567_stage1_epoch3_ms_test_submission.py'),
          ('TRAINVAL_COMPLETE', 'SS_SUBMISSION_COMPLETE',
-          'MS_SUBMISSION_COMPLETE')),
+          'MS_SUBMISSION_COMPLETE'),
+         ('skip_if_insufficient_window TRAINVAL',
+          'skip_if_insufficient_window SS_SUBMISSION',
+          'skip_if_insufficient_window MS_SUBMISSION')),
         (SS_POSTEVAL,
          '/data1/zcy/Orbdet/work_dirs/formal/orbdet_v0_2_dota1_ss_gpu89_seed42_20260818/epoch_12.pth',
          'CUDA_VISIBLE_DEVICES=8,9', '--nproc_per_node=2',
@@ -128,9 +131,12 @@ def test_bounded_posteval_launchers_pin_resources_validate_contracts_and_outputs
           '--config-token OrbdetV02Detector', '--config-token randomness'),
          ('orbdet_v0_2_r50_dota1_epoch12_trainval_eval_gpu89.py',
           'orbdet_v0_2_r50_dota1_epoch12_test_submission_gpu89.py'),
-         ('TRAINVAL_COMPLETE', 'SS_SUBMISSION_COMPLETE')),
+         ('TRAINVAL_COMPLETE', 'SS_SUBMISSION_COMPLETE'),
+         ('skip_if_insufficient_window TRAINVAL',
+          'skip_if_insufficient_window SS_SUBMISSION')),
     )
-    for path, checkpoint, gpu, ranks, ports, lock, validator, configs, markers in cases:
+    for (path, checkpoint, gpu, ranks, ports, lock, validator, configs,
+         markers, phase_gates) in cases:
         text = path.read_text()
         for required in (
                 'set -euo pipefail', DEADLINE,
@@ -141,11 +147,22 @@ def test_bounded_posteval_launchers_pin_resources_validate_contracts_and_outputs
                 'rtk rmdir "${lock_path}"', 'trap release_launch_lock EXIT',
                 'nvidia-smi -i', '--expected-state-tensors 371',
                 'checkpoint_contract.json', 'archive.testzip() is None',
-                'len(actual) == 15', 'COMPLETE', 'timeout --signal=INT',
-                *ports, *validator, *configs, *markers):
+                'names=archive.namelist()', 'len(names) == 15',
+                'actual == expected', 'COMPLETE', 'timeout --signal=INT',
+                'existing_status_marker="$(rtk find "${status_dir}"',
+                '-mindepth 1 -maxdepth 1 -print -quit)',
+                '[[ -n "${existing_status_marker}"',
+                'FAILED', 'INTERRUPTED', 'CHECKPOINT_VALIDATED',
+                *ports, *validator, *configs, *markers, *phase_gates):
             assert required in text, required
         assert [text.index(name) for name in configs] == sorted(
             text.index(name) for name in configs)
+        assert [text.index(gate) for gate in phase_gates] == sorted(
+            text.index(gate) for gate in phase_gates)
+        for gate, port in zip(phase_gates, ports):
+            assert text.index(gate) < text.index(port)
+        assert text.index('existing_status_marker=') < text.index(
+            'gpu_processes=')
         assert 'tools/train.py' not in text
         assert '--resume' not in text
         assert 'rm -' not in text
