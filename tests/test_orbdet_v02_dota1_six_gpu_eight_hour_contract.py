@@ -204,6 +204,12 @@ def test_bounded_posteval_launchers_pin_resources_validate_contracts_and_outputs
                 ranks, lock, 'NCCL_P2P_DISABLE=1', 'NCCL_IB_DISABLE=1',
                 'launch_lock_held=0', 'rtk mkdir "${lock_path}"',
                 'rtk rmdir "${lock_path}"', 'trap release_launch_lock EXIT',
+                'work_began=0', 'work_began=1',
+                'elif (( work_began == 1 )); then',
+                'rtk mv "${status_dir}/RUNNING" "${status_dir}/FAILED"',
+                'rtk mv "${status_dir}/RUNNING" "${status_dir}/INTERRUPTED"',
+                'rtk mv "${status_dir}/RUNNING" "${status_dir}/POSTEVAL_SKIPPED_INSUFFICIENT_WINDOW"',
+                'rtk mv "${status_dir}/RUNNING" "${status_dir}/COMPLETE"',
                 'nvidia-smi -i', '--expected-state-tensors 371',
                 'checkpoint_contract.json', 'archive.testzip() is None',
                 'names=archive.namelist()', 'len(names) == 15',
@@ -226,3 +232,4 @@ def test_bounded_posteval_launchers_pin_resources_validate_contracts_and_outputs
         assert '--resume' not in text
         assert 'rm -' not in text
         assert 'flock' not in text
+        assert 'rtk touch "${status_dir}/COMPLETE"' not in text

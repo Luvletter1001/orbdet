@@ -13,6 +13,7 @@ eval_root=/data1/zcy/Orbdet/work_dirs/eval/orbdet_v0_2_dota1_ms_rr_gpu4567_epoch
 status_dir="${eval_root}/status"
 lock_path=/data1/zcy/Orbdet/work_dirs/.gpu_4_5_6_7.launch_lock
 launch_lock_held=0
+work_began=0
 
 trainval_config="${repo_root}/configs/orbdet/orbdet_v0_2_r50_dota1_ms_rr_gpu4567_stage1_epoch3_trainval_eval.py"
 ss_config="${repo_root}/configs/orbdet/orbdet_v0_2_r50_dota1_ms_rr_gpu4567_stage1_epoch3_ss_test_submission.py"
@@ -38,13 +39,26 @@ release_launch_lock() {
 
 on_error() {
   exit_code=$?
-  rtk touch "${status_dir}/FAILED"
+  trap - ERR INT TERM
+  if [[ -e "${status_dir}/RUNNING" ]]; then
+    rtk mv "${status_dir}/RUNNING" "${status_dir}/FAILED"
+    work_began=0
+  elif (( work_began == 1 )); then
+    rtk touch "${status_dir}/FAILED"
+    work_began=0
+  fi
   rtk echo "Epoch-8 MS+RR post-evaluation failed with exit ${exit_code}." >&2
   exit "${exit_code}"
 }
 on_signal() {
   trap - ERR INT TERM
-  rtk touch "${status_dir}/INTERRUPTED"
+  if [[ -e "${status_dir}/RUNNING" ]]; then
+    rtk mv "${status_dir}/RUNNING" "${status_dir}/INTERRUPTED"
+    work_began=0
+  elif (( work_began == 1 )); then
+    rtk touch "${status_dir}/INTERRUPTED"
+    work_began=0
+  fi
   rtk echo 'Epoch-8 MS+RR post-evaluation reached its absolute deadline.' >&2
   exit 130
 }
@@ -52,14 +66,24 @@ trap on_error ERR
 trap on_signal INT TERM
 trap release_launch_lock EXIT
 
+mark_insufficient_window() {
+  local phase=$1
+  if [[ -e "${status_dir}/RUNNING" ]]; then
+    rtk mv "${status_dir}/RUNNING" "${status_dir}/POSTEVAL_SKIPPED_INSUFFICIENT_WINDOW"
+    work_began=0
+  else
+    rtk touch "${status_dir}/POSTEVAL_SKIPPED_INSUFFICIENT_WINDOW"
+  fi
+  rtk touch "${status_dir}/${phase}_SKIPPED_INSUFFICIENT_WINDOW"
+}
+
 skip_if_insufficient_window() {
   local phase=$1
   local now_epoch remaining_seconds
   now_epoch="$(rtk date +%s)"
   remaining_seconds=$(( deadline_epoch - now_epoch ))
   if (( remaining_seconds < minimum_eval_seconds )); then
-    rtk touch "${status_dir}/POSTEVAL_SKIPPED_INSUFFICIENT_WINDOW"
-    rtk touch "${status_dir}/${phase}_SKIPPED_INSUFFICIENT_WINDOW"
+    mark_insufficient_window "${phase}"
     rtk echo "Only ${remaining_seconds}s remain before ${deadline_local}; skipping ${phase}."
     exit 0
   fi
@@ -70,7 +94,7 @@ run_bounded() {
   now_epoch="$(rtk date +%s)"
   remaining_seconds=$(( deadline_epoch - now_epoch ))
   if (( remaining_seconds <= 0 )); then
-    rtk touch "${status_dir}/POSTEVAL_SKIPPED_INSUFFICIENT_WINDOW"
+    mark_insufficient_window DEADLINE
     rtk echo 'POSTEVAL_SKIPPED_INSUFFICIENT_WINDOW: deadline already reached.' >&2
     exit 0
   fi
@@ -122,6 +146,7 @@ fi
 skip_if_insufficient_window PRECHECK
 
 rtk touch "${status_dir}/RUNNING"
+work_began=1
 run_bounded rtk env PYTHONNOUSERSITE=1 "${python_bin}" "${checkpoint_validator}" \
   "${checkpoint}" --expected-epoch 8 --expected-iter 136656 \
   --expected-state-tensors 371 --config-token OrbdetV02Detector \
@@ -141,5 +166,6 @@ skip_if_insufficient_window MS_SUBMISSION
 run_bounded rtk env PYTHONNOUSERSITE=1 PYTHONPATH="${repo_root}" MPLCONFIGDIR=/tmp/zcy-codex/mplconfig OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 CUDA_VISIBLE_DEVICES=4,5,6,7 NCCL_P2P_DISABLE=1 NCCL_IB_DISABLE=1 "${python_bin}" -m torch.distributed.launch --nproc_per_node=4 --master_port=29676 "${repo_root}/tools/test.py" "${ms_config}" "${checkpoint}" --launcher=pytorch --cfg-options "work_dir=${ms_work_dir}" "test_evaluator.outfile_prefix=${ms_prefix}"
 validate_zip "${ms_zip}"
 rtk touch "${status_dir}/MS_SUBMISSION_COMPLETE"
-rtk touch "${status_dir}/COMPLETE"
+rtk mv "${status_dir}/RUNNING" "${status_dir}/COMPLETE"
+work_began=0
 rtk echo 'Epoch-8 MS+RR trainval, SS, and MS post-evaluation completed.'
