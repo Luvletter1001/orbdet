@@ -100,7 +100,31 @@ def test_controller_orders_primary_before_secondary_and_never_overreaches():
     assert 'epoch_8.pth' in text
     assert 'epoch_12.pth' in text
     assert 'epoch_9.pth' in text
+    assert 'epoch_13.pth' in text
     assert 'TIME_LIMIT_REACHED' in text
+    required_launchers = (
+        'run_orbdet_v0_2_dota1_msrr_resume_e3_to_e4_gpu4567_smoke.sh',
+        'run_orbdet_v0_2_dota1_msrr_resume_e3_to_e8_gpu4567.sh',
+        'run_orbdet_v0_2_dota1_ss_seed42_gpu89_smoke.sh',
+        'run_orbdet_v0_2_dota1_ss_seed42_gpu89.sh',
+        'run_orbdet_v0_2_dota1_ss_seed42_epoch12_posteval_gpu89.sh',
+        'run_orbdet_v0_2_dota1_msrr_epoch8_posteval_gpu4567.sh',
+    )
+    for launcher in required_launchers:
+        assert launcher in text
+    assert '51446' in text
+    assert 'math.isfinite' in text
+    assert 'loss' in text
+    assert 'grad_norm' in text
+    assert 'time' in text
+    assert 'wait "${ms_pid}"' in text
+    assert 'wait "${ss_pid}"' in text
+    assert 'jobs -pr' in text
+    assert 'kill -0' not in text
+    assert text.index('ss_posteval_launcher') < text.index(
+        'ms_posteval_launcher')
+    assert 'tmux' not in text
+    assert 'nohup' not in text
     assert 'rm -' not in text
 
 
