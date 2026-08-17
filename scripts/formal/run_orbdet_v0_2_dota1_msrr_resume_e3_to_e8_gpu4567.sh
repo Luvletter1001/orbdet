@@ -91,5 +91,5 @@ fi
 rtk env PYTHONNOUSERSITE=1 "${python_bin}" "${checkpoint_validator}" \
   "${work_dir}/epoch_8.pth" --expected-epoch 8 --expected-iter 136656 \
   --config-token OrbdetV02Detector --config-token trainval_ms_full
-rtk touch "${work_dir}/COMPLETE"
+rtk mv "${work_dir}/RUNNING" "${work_dir}/COMPLETE"
 rtk echo 'MS+RR formal continuation completed through epoch 8.'

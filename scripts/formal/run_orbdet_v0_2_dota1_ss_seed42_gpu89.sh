@@ -77,5 +77,5 @@ fi
 rtk env PYTHONNOUSERSITE=1 "${python_bin}" "${checkpoint_validator}" \
   "${work_dir}/epoch_12.pth" --expected-epoch 12 --expected-iter 38280 \
   --config-token OrbdetV02Detector --config-token randomness
-rtk touch "${work_dir}/COMPLETE"
+rtk mv "${work_dir}/RUNNING" "${work_dir}/COMPLETE"
 rtk echo 'SS seed-42 formal run completed through epoch 12.'
