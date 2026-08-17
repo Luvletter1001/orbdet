@@ -163,6 +163,8 @@ def test_controller_orders_primary_before_secondary_and_never_overreaches():
     assert 'statistics.median' in text
     assert 'priority_breach_count' in text
     assert 'priority_breach_count >= 3' in text
+    assert 'ss_observed_epoch > priority_stop_baseline_epoch' in text
+    assert 'ss_checkpoint_landed_at' not in text
     assert 'SS_STOP_REQUESTED' in text
     assert 'latest_complete_ss_checkpoint' in text
     assert 'SS_STOPPED_FOR_PRIMARY_PRIORITY' in text

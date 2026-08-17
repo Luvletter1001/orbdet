@@ -552,7 +552,6 @@ priority_stop_baseline_epoch=0
 priority_poll_seconds=30
 next_priority_poll="$(rtk date +%s)"
 ss_observed_epoch=0
-ss_checkpoint_landed_at=0
 ss_latest_checkpoint=NONE
 while child_is_running "${ms_pid}" || child_is_running "${ss_pid}"; do
   if at_deadline; then
@@ -571,7 +570,6 @@ while child_is_running "${ms_pid}" || child_is_running "${ss_pid}"; do
     if (( checkpoint_epoch > ss_observed_epoch )); then
       ss_observed_epoch=${checkpoint_epoch}
       ss_latest_checkpoint=${checkpoint_path}
-      ss_checkpoint_landed_at=${now_epoch}
     fi
   elif (( checkpoint_exit != 10 )); then
     fail_controller SS_CHECKPOINT_SCAN_FAILED 41
@@ -613,14 +611,6 @@ while child_is_running "${ms_pid}" || child_is_running "${ss_pid}"; do
       rtk touch "${controller_root}/SS_STOP_REQUESTED"
       rtk printf '%s\n' "${ss_latest_checkpoint}" \
         >"${controller_root}/ss_stop_requested_checkpoint"
-      if (( ss_observed_epoch > 0 &&
-            now_epoch - ss_checkpoint_landed_at <= priority_poll_seconds )) && \
-          child_is_running "${ms_pid}" && child_is_running "${ss_pid}"; then
-        if ! stop_secondary_for_primary_priority \
-            "${ss_latest_checkpoint}"; then
-          fail_controller SS_PRIORITY_STOP_FAILED 42
-        fi
-      fi
     fi
   fi
   rtk sleep 5
