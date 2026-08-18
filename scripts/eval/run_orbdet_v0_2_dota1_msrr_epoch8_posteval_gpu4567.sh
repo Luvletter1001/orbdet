@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+shopt -s nullglob
 
 repo_root="$(rtk realpath "$(rtk dirname "${BASH_SOURCE[0]}")/../..")"
 python_bin=/data/zcy/anaconda3/envs/orbdet/bin/python
@@ -126,8 +127,8 @@ if ! rtk mkdir "${lock_path}"; then
 fi
 launch_lock_held=1
 
-existing_status_marker="$(rtk find "${status_dir}" -mindepth 1 -maxdepth 1 -print -quit)"
-if [[ -n "${existing_status_marker}" || -e "${trainval_work_dir}" || \
+existing_status_markers=("${status_dir}"/*)
+if (( ${#existing_status_markers[@]} > 0 )) || [[ -e "${trainval_work_dir}" || \
       -e "${ss_work_dir}" || -e "${ms_work_dir}" || -e "${ss_prefix}" || \
       -e "${ms_prefix}" ]]; then
   rtk echo "Existing post-evaluation output found in ${eval_root}." >&2

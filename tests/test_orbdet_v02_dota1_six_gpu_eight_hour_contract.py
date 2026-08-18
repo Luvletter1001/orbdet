@@ -287,9 +287,9 @@ def test_bounded_posteval_launchers_pin_resources_validate_contracts_and_outputs
                 'checkpoint_contract.json', 'archive.testzip() is None',
                 'names=archive.namelist()', 'len(names) == 15',
                 'actual == expected', 'COMPLETE', 'timeout --signal=INT',
-                'existing_status_marker="$(rtk find "${status_dir}"',
-                '-mindepth 1 -maxdepth 1 -print -quit)',
-                '[[ -n "${existing_status_marker}"',
+                'shopt -s nullglob',
+                'existing_status_markers=("${status_dir}"/*)',
+                '(( ${#existing_status_markers[@]} > 0 ))',
                 'FAILED', 'INTERRUPTED', 'CHECKPOINT_VALIDATED',
                 *ports, *validator, *configs, *markers, *phase_gates):
             assert required in text, required
@@ -299,11 +299,12 @@ def test_bounded_posteval_launchers_pin_resources_validate_contracts_and_outputs
             text.index(gate) for gate in phase_gates)
         for gate, port in zip(phase_gates, ports):
             assert text.index(gate) < text.index(port)
-        assert text.index('existing_status_marker=') < text.index(
+        assert text.index('existing_status_markers=') < text.index(
             'gpu_processes=')
         assert 'tools/train.py' not in text
         assert '--resume' not in text
         assert 'rm -' not in text
+        assert 'rtk find' not in text
         assert 'flock' not in text
         assert 'rtk touch "${status_dir}/COMPLETE"' not in text
         assert (
