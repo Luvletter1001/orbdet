@@ -271,6 +271,7 @@ def test_bounded_posteval_launchers_pin_resources_validate_contracts_and_outputs
         text = path.read_text()
         for required in (
                 'set -euo pipefail', DEADLINE,
+                'POSTEVAL_DEADLINE:-2026-08-18 08:20:00 +0800',
                 'MINIMUM_EVAL_SECONDS:-1500',
                 'POSTEVAL_SKIPPED_INSUFFICIENT_WINDOW', checkpoint, gpu,
                 ranks, lock, 'NCCL_P2P_DISABLE=1', 'NCCL_IB_DISABLE=1',

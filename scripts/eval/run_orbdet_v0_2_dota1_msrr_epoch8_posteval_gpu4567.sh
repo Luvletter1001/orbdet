@@ -4,7 +4,7 @@ set -euo pipefail
 repo_root="$(rtk realpath "$(rtk dirname "${BASH_SOURCE[0]}")/../..")"
 python_bin=/data/zcy/anaconda3/envs/orbdet/bin/python
 checkpoint_validator="${repo_root}/tools/analysis_tools/validate_checkpoint_contract.py"
-deadline_local='2026-08-18 08:20:00 +0800'
+deadline_local="${POSTEVAL_DEADLINE:-2026-08-18 08:20:00 +0800}"
 deadline_epoch="$(rtk date -d "${deadline_local}" +%s)"
 minimum_eval_seconds="${MINIMUM_EVAL_SECONDS:-1500}"
 stage_root=/data1/zcy/Orbdet/work_dirs/formal/orbdet_v0_2_dota1_ms_rr_gpu4567_seed3407_resume_e3_to_e8_20260818
