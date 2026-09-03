@@ -167,7 +167,8 @@ def test_manifest_records_all_hashes_and_thresholds(tmp_path):
         row_count=20,
         matched_count=11,
         valid_count=9,
-        roi_mode='hbox')
+        roi_mode='hbox',
+        extra_cues=False)
     for key in (
             'config_sha256', 'checkpoint_sha256',
             'low_rank_function_sha256', 'holdout_manifest_sha256'):
@@ -222,6 +223,44 @@ def test_feature_hboxes_rejects_unknown_roi_mode():
     # default mode stays hbox and accepts empty input
     hboxes, keep, geometries = C._feature_hboxes_and_geometry([])
     assert hboxes == [] and keep == [] and geometries == []
+
+
+def test_spatial_activation_axis_recovers_blob_long_axis():
+    # elongated activation blob at +30 degrees inside a 32x32 RoI
+    theta = math.radians(30.0)
+    yy, xx = torch.meshgrid(
+        torch.arange(32, dtype=torch.float32),
+        torch.arange(32, dtype=torch.float32),
+        indexing='ij')
+    ca, sa = math.cos(-theta), math.sin(-theta)
+    u = ca * (xx - 16) - sa * (yy - 16)   # along long axis
+    v = sa * (xx - 16) + ca * (yy - 16)
+    blob = ((u.abs() <= 10) & (v.abs() <= 2)).float()
+    features = torch.stack([blob, blob * 0.5 + 0.01])[None]  # [1, 2, 32, 32]
+    axis, eccentricity = C.spatial_activation_axis(features)
+    err = abs(math.degrees(float(axis[0])) - 30.0 + 90) % 180 - 90
+    assert abs(err) < 3.0
+    assert float(eccentricity[0]) > 0.8
+    # a square blob is isotropic: low eccentricity, axis meaningless
+    square = torch.ones(1, 2, 32, 32)
+    square[:, :, 8:24, 8:24] = 2.0
+    _, ecc_square = C.spatial_activation_axis(square)
+    assert float(ecc_square[0]) < 0.1
+    with pytest.raises(ValueError):
+        C.spatial_activation_axis(torch.zeros(3, 3))
+
+
+def test_image_patch_axis_follows_pixel_edges():
+    # bright horizontal bar (long axis along x) in a square crop
+    images = torch.zeros(1, 3, 64, 64)
+    images[:, :, 28:36, 8:56] = 1.0
+    boxes = [torch.tensor([[4., 4., 60., 60.]])]
+    axis = C.image_patch_axis(images, boxes, out_size=14)
+    assert axis.numel() == 1
+    err = abs((math.degrees(float(axis[0])) + 90) % 180 - 90)
+    assert err < 5.0
+    # empty input yields empty output
+    assert C.image_patch_axis(images, [torch.zeros(0, 4)]).numel() == 0
 
 
 def test_low_rank_roi_evidence_is_finite_and_level_in_range():

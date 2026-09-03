@@ -57,7 +57,9 @@ _BASE_ROW_KEYS = {
 _EVIDENCE_KEYS = {
     'low_rank_angle', 'low_rank_confidence', 'low_rank_anisotropy',
     'low_rank_energy', 'low_rank_valid', 'low_rank_sigma1',
-    'low_rank_sigma2', 'fpn_level'
+    'low_rank_sigma2', 'fpn_level',
+    # optional feature/image cues (only present with --extra-cues)
+    'spatial_axis', 'spatial_eccentricity', 'image_axis'
 }
 _GEOMETRY_KEYS = {'gt_width', 'gt_height', 'gt_area', 'gt_aspect_ratio'}
 _MATCH_KEYS = {
@@ -415,6 +417,100 @@ def _square_hboxes(hboxes: torch.Tensor) -> torch.Tensor:
         dim=1)
 
 
+def spatial_activation_axis(roi_features: torch.Tensor,
+                            eps: float = 1e-6) -> Tuple[torch.Tensor, ...]:
+    """Axis (mod pi) of the RoI activation-energy blob via spatial moments.
+
+    Unlike the gradient structure tensor (which cannot distinguish an edge's
+    two perpendicular readings), the activation *support* is informative about
+    the object itself: the long axis of the activation ellipse is the object's
+    long axis, with no 90-degree ambiguity. Uses the feature content ("where
+    the object responds") rather than gradient math only.
+
+    Returns ``(axis, eccentricity)``: ``axis`` in (-pi/2, pi/2] with 0 along
+    the +x direction (same convention as ``low_rank_angle``), ``eccentricity``
+    in [0, 1] measuring how elongated the blob is (0 = isotropic).
+    """
+    if roi_features.ndim != 4:
+        raise ValueError('roi_features must have shape [N, C, H, W]')
+    work = roi_features.float() if roi_features.dtype in (
+        torch.float16, torch.bfloat16) else roi_features
+    energy = work.square().mean(dim=1)  # [N, H, W]
+    # suppress uniform background: only above-median response counts
+    background = energy.flatten(1).median(dim=1).values[:, None, None]
+    energy = (energy - background).clamp_min(0)
+    n = energy.shape[0]
+    height, width = energy.shape[-2:]
+    ys = torch.arange(height, device=energy.device, dtype=energy.dtype)
+    xs = torch.arange(width, device=energy.device, dtype=energy.dtype)
+    total = energy.sum(dim=(-2, -1)) + eps
+    cy = (energy * ys[None, :, None]).sum(dim=(-2, -1)) / total
+    cx = (energy * xs[None, None, :]).sum(dim=(-2, -1)) / total
+    dy = ys[None, :, None] - cy[:, None, None]
+    dx = xs[None, None, :] - cx[:, None, None]
+    cov_yy = (energy * dy.square()).sum(dim=(-2, -1)) / total
+    cov_xx = (energy * dx.square()).sum(dim=(-2, -1)) / total
+    cov_xy = (energy * dx * dy).sum(dim=(-2, -1)) / total
+    axis = 0.5 * torch.atan2(2 * cov_xy, cov_xx - cov_yy)
+    # plain wrap into (-pi/2, pi/2]: this axis IS the blob long axis,
+    # no -90 degree edge rotation (unlike the gradient structure tensor)
+    axis = torch.remainder(axis + math.pi / 2, math.pi) - math.pi / 2
+    trace = cov_xx + cov_yy
+    delta = ((cov_xx - cov_yy).square() + 4 * cov_xy.square()).sqrt()
+    lam_max = 0.5 * (trace + delta)
+    lam_min = (0.5 * (trace - delta)).clamp_min(0)
+    eccentricity = 1 - lam_min / (lam_max + eps)
+    return axis, eccentricity
+
+
+def image_patch_axis(images: torch.Tensor,
+                     hboxes_per_image: Sequence[torch.Tensor],
+                     out_size: int = ROI_OUTPUT_SIZE,
+                     eps: float = 1e-6) -> torch.Tensor:
+    """Structure-tensor axis from the *input image* itself under each box.
+
+    Independent evidence source: the real pixel edges (hull sides, wing
+    edges, lane markings) inside the same square region. ``images`` is the
+    preprocessed batch tensor [B, C, H, W] and ``hboxes_per_image`` the
+    per-image boxes in that coordinate frame (square boxes keep the crop
+    isotropic). Per-channel means only shift gradients away; per-channel
+    gradient moments are summed so std scaling is harmless.
+    """
+    from mmcv.ops import roi_align
+
+    reference = images
+    cleaned = []
+    for image_index, hboxes in enumerate(hboxes_per_image):
+        if hboxes is None or hboxes.numel() == 0:
+            cleaned.append(reference.new_empty((0, 4)))
+            continue
+        cleaned.append(hboxes.to(device=reference.device,
+                                 dtype=torch.float32))
+    if sum(box.shape[0] for box in cleaned) == 0:
+        return reference.new_empty((0,))
+    rois = bbox2roi(cleaned)
+    patches = roi_align(
+        reference, rois, (out_size, out_size), 1.0,
+        ROI_SAMPLING_RATIO, 'avg', True)
+    work = patches.mean(dim=1, keepdim=True)  # grayscale [N, 1, H, W]
+    gx = 0.5 * (work[:, :, 1:-1, 2:] - work[:, :, 1:-1, :-2])
+    gy = 0.5 * (work[:, :, 2:, 1:-1] - work[:, :, :-2, 1:-1])
+    height, width = gx.shape[-2:]
+    wy = torch.hann_window(
+        height + 2, periodic=False, device=work.device, dtype=work.dtype
+    )[1:-1]
+    wx = torch.hann_window(
+        width + 2, periodic=False, device=work.device, dtype=work.dtype
+    )[1:-1]
+    support = wy[:, None] * wx[None, :]
+    axial_x = (support * (gx.square() - gy.square())).sum(dim=(-2, -1))
+    axial_y = (support * (2.0 * gx * gy)).sum(dim=(-2, -1))
+    gradient_phase = 0.5 * torch.atan2(axial_y[:, 0], axial_x[:, 0])
+    # edges run along the object: axis = gradient direction - 90 degrees
+    return torch.remainder(
+        gradient_phase + math.pi, math.pi) - math.pi / 2
+
+
 def build_roi_extractor():
     """Build the fixed GT-HBox FPN RoI extractor."""
     return MODELS.build(
@@ -430,9 +526,14 @@ def build_roi_extractor():
 
 def low_rank_evidence_for_hboxes(roi_extractor, features: Tuple[torch.Tensor,
                                                                 ...],
-                                 hboxes_per_image: Sequence[torch.Tensor]
+                                 hboxes_per_image: Sequence[torch.Tensor],
+                                 extra_cues: bool = False
                                  ) -> Dict[str, torch.Tensor]:
-    """Extract RoIs and evaluate the low-rank evidence per instance."""
+    """Extract RoIs and evaluate the low-rank evidence per instance.
+
+    With ``extra_cues=True`` additionally returns ``spatial_axis`` /
+    ``spatial_eccentricity`` from the activation-support second moments.
+    """
     reference = features[0]
     empty_long = reference.new_empty((0,), dtype=torch.long)
     cleaned = []
@@ -472,7 +573,7 @@ def low_rank_evidence_for_hboxes(roi_extractor, features: Tuple[torch.Tensor,
         torch.arange(count, device=reference.device, dtype=torch.long)
         for count in counts if count > 0
     ]) if any(count > 0 for count in counts) else empty_long
-    return dict(
+    result = dict(
         batch_index=batch_index,
         instance_index=instance_index,
         low_rank_angle=evidence['axis_angle'].detach(),
@@ -483,6 +584,12 @@ def low_rank_evidence_for_hboxes(roi_extractor, features: Tuple[torch.Tensor,
         low_rank_sigma1=evidence['singular_values'][:, 0].detach(),
         low_rank_sigma2=evidence['singular_values'][:, 1].detach(),
         fpn_level=fpn_level.detach().long())
+    if extra_cues:
+        spatial_axis, spatial_eccentricity = spatial_activation_axis(
+            roi_features.detach())
+        result['spatial_axis'] = spatial_axis.detach()
+        result['spatial_eccentricity'] = spatial_eccentricity.detach()
+    return result
 
 
 def _feature_hboxes_and_geometry(feature_instances, roi_mode: str = 'hbox'):
@@ -603,6 +710,13 @@ def parse_args(argv: Optional[Sequence[str]] = None):
         help="RoI geometry fed to RoIAlign: 'hbox' keeps the tight GT HBox; "
              "'square' pools the centered square (side=max(W,H)) to avoid "
              'anisotropic-resampling bias in the low-rank structure tensor')
+    parser.add_argument(
+        '--extra-cues',
+        action='store_true',
+        help='additionally record feature/image cues per instance: '
+             'spatial_axis + spatial_eccentricity (activation-support '
+             'second moments) and image_axis (structure tensor on the raw '
+             'input-image crop)')
     return parser.parse_args(argv)
 
 
@@ -631,7 +745,8 @@ def _validate_grouped_holdout(cfg) -> None:
 
 def _write_rows(stream, runner, model, roi_extractor, run_name: str,
                 max_images: Optional[int], score_threshold: float,
-                iou_threshold: float, roi_mode: str) -> Dict[str, int]:
+                iou_threshold: float, roi_mode: str,
+                extra_cues: bool) -> Dict[str, int]:
     image_count = row_count = matched_count = valid_count = 0
     collected_rows = []
     with torch.inference_mode():
@@ -665,7 +780,11 @@ def _write_rows(stream, runner, model, roi_extractor, run_name: str,
             hboxes_per_image, keep_indices, geometries = (
                 _feature_hboxes_and_geometry(feature_instances, roi_mode))
             raw_evidence = low_rank_evidence_for_hboxes(
-                roi_extractor, features, hboxes_per_image)
+                roi_extractor, features, hboxes_per_image,
+                extra_cues=extra_cues)
+            if extra_cues:
+                # Same concatenated RoI order as raw_evidence rows.
+                image_axes = image_patch_axis(inputs, hboxes_per_image)
             evidence_by_image = [dict() for _ in samples]
             for row_id in range(raw_evidence['batch_index'].numel()):
                 b = int(raw_evidence['batch_index'][row_id])
@@ -674,7 +793,11 @@ def _write_rows(stream, runner, model, roi_extractor, run_name: str,
                 evidence_by_image[b][original_gt_index] = {
                     key: raw_evidence[key][row_id]
                     for key in _EVIDENCE_KEYS
+                    if key in raw_evidence
                 }
+                if extra_cues:
+                    evidence_by_image[b][original_gt_index][
+                        'image_axis'] = image_axes[row_id]
             predictions = list(model.predict(inputs, samples, rescale=True))
             if len(predictions) != len(samples):
                 raise ValueError('predictions and samples must align')
@@ -734,7 +857,8 @@ def _write_rows(stream, runner, model, roi_extractor, run_name: str,
 def build_manifest(*, run_name, config_path, checkpoint_path,
                    low_rank_function_path, holdout_manifest_path, output_path,
                    score_threshold, iou_threshold, max_images, image_count,
-                   row_count, matched_count, valid_count, roi_mode) -> Dict:
+                   row_count, matched_count, valid_count, roi_mode,
+                   extra_cues) -> Dict:
     """Assemble the immutable manifest with all frozen-input hashes."""
     def _digest(path):
         path = Path(path)
@@ -761,7 +885,8 @@ def build_manifest(*, run_name, config_path, checkpoint_path,
         row_count=int(row_count),
         matched_count=int(matched_count),
         valid_count=int(valid_count),
-        roi_mode=str(roi_mode))
+        roi_mode=str(roi_mode),
+        extra_cues=bool(extra_cues))
     return manifest
 
 
@@ -839,6 +964,7 @@ def collect(args) -> Dict:
     roi_mode = str(args.roi_mode)
     if roi_mode not in ROI_MODES:
         raise ValueError(f'roi_mode must be one of {ROI_MODES}')
+    extra_cues = bool(args.extra_cues)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     config_digest = sha256_file(config_path)
@@ -872,7 +998,8 @@ def collect(args) -> Dict:
             with output_temp.open('x', encoding='utf-8') as stream:
                 counts = _write_rows(
                     stream, runner, model, roi_extractor, run_name,
-                    max_images, score_threshold, iou_threshold, roi_mode)
+                    max_images, score_threshold, iou_threshold, roi_mode,
+                    extra_cues)
                 stream.flush()
                 os.fsync(stream.fileno())
 
@@ -887,6 +1014,7 @@ def collect(args) -> Dict:
             iou_threshold=iou_threshold,
             max_images=max_images,
             roi_mode=roi_mode,
+            extra_cues=extra_cues,
             **counts)
         # The content digest is computed on the staged temp file (same bytes
         # as the hard-linked release); record the final published path.
