@@ -202,9 +202,12 @@ def test_b_t6_head_parity_and_detach_isolation():
             assert torch.equal(lp, lc), 'probe-off must be bit-identical'
     assert child_off.last_gda_probe == []
 
-    # probe enabled: baseline outputs still identical, probe stashed
+    # probe enabled: baseline outputs still identical, probe stashed.
+    # init_weights is exercised explicitly (ConvModule-with-norm convs
+    # have bias=None -- a crash surface that broke the first smoke).
     cfg = _tiny_head_cfg(gda_probe=dict(enabled=True, detach_feats=True))
     child_on = H2RBoxGDAHead(**cfg)
+    child_on.init_weights()
     child_on.load_state_dict(parent.state_dict(), strict=False)
     child_on.eval()
     with torch.no_grad():

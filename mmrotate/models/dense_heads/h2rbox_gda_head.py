@@ -96,7 +96,8 @@ class H2RBoxGDAHead(H2RBoxV2Head):
         for m in self.gda_probe_tower.modules():
             if isinstance(m, nn.Conv2d):
                 nn.init.normal_(m.weight, mean=0, std=0.01)
-                nn.init.constant_(m.bias, 0)
+                if m.bias is not None:  # ConvModule with norm -> bias=None
+                    nn.init.constant_(m.bias, 0)
         nn.init.normal_(self.gda_probe_predictor.weight, mean=0, std=0.01)
         # bias prior: t=0; a_raw=-2 -> a=softplus(-2)=0.127 (aspect~1.14,
         # gate ~0.5 on the [1.1, 1.3) band edge); u2 ~ N(0, 0.01); bit=0.
