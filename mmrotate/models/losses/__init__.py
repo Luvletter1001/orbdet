@@ -10,6 +10,7 @@ from .hbox_fpn_group_orbit_loss import HBoxFPNGroupOrbitLoss
 from .kf_iou_loss import KFLoss
 from .low_rank_orientation_evidence import low_rank_channel_orientation_evidence
 from .orbdet_anchored_symmetry_loss import OrbdetAnchoredSymmetryLoss
+from .orbdet_gda_probe_losses import OrbdetGDAProbeLoss
 from .orbdet_harmonic_consistency_loss import OrbdetHarmonicConsistencyLoss
 from .rotated_iou_loss import RotatedIoULoss
 from .smooth_focal_loss import SmoothFocalLoss
@@ -22,5 +23,6 @@ __all__ = [
     'HBoxFPNGroupOrbitLoss',
     'low_rank_channel_orientation_evidence',
     'OrbdetAnchoredSymmetryLoss', 'OrbdetHarmonicConsistencyLoss',
-    'GroupOrbitDeterminantalClusterLoss', 'build_planar_group_orbit'
+    'GroupOrbitDeterminantalClusterLoss', 'build_planar_group_orbit',
+    'OrbdetGDAProbeLoss'
 ]
