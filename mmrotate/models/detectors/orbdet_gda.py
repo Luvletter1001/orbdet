@@ -125,9 +125,11 @@ class OrbdetGDADetector(OrbdetV02Detector):
             offset += n
         return gt_flp
 
-    def _view_tensors(self, head, stash: List[Tensor], points: List[Tensor],
+    def _view_tensors(self, head, stash: List[Tensor],
+                      main_ang: List[Tensor], points: List[Tensor],
                       gts: InstanceList, v: int, n_img: int):
-        """Per-view flattened probe rows and decoded gt of positives."""
+        """Per-view flattened probe rows, decoded-gt envelopes and the
+        detached main-head angle of positives."""
         with torch.no_grad():
             labels_l, bbox_t_l, angle_t_l, bid_l = head.get_targets(
                 points, gts)
@@ -139,6 +141,10 @@ class OrbdetGDADetector(OrbdetV02Detector):
         flat_rows = torch.cat([
             stash[l][v * n_img:(v + 1) * n_img].permute(0, 2, 3, 1).reshape(
                 -1, stash[l].size(1)) for l in range(len(stash))
+        ])
+        flat_main = torch.cat([
+            main_ang[l][v * n_img:(v + 1) * n_img].permute(
+                0, 2, 3, 1).reshape(-1) for l in range(len(main_ang))
         ])
         pos = (flat_labels >= 0) & (flat_labels < head.num_classes)
         rows = flat_rows[pos]
@@ -153,7 +159,7 @@ class OrbdetGDADetector(OrbdetV02Detector):
             w_gt, h_gt, th_gt = dec[:, 2], dec[:, 3], dec[:, 4]
             env_w, env_h = envelope_from_wh_theta(w_gt, h_gt, th_gt)
             extras = torch.stack(
-                [env_w, env_h, torch.sin(2.0 * th_gt)], dim=-1)
+                [env_w, env_h, torch.sin(2.0 * flat_main[pos])], dim=-1)
         return rows, bids, extras
 
     # -- main hook -------------------------------------------------------
@@ -166,8 +172,9 @@ class OrbdetGDADetector(OrbdetV02Detector):
         if not enabled:
             return losses
         stash = getattr(head, 'last_gda_probe', None)
+        main_ang = getattr(head, 'last_gda_main_angle', None)
         rot_view = getattr(self, '_gda_rot_view', None)
-        if not stash or rot_view is None:
+        if not stash or not main_ang or rot_view is None:
             return losses
 
         rot = rot_view['rot']
@@ -184,7 +191,8 @@ class OrbdetGDADetector(OrbdetV02Detector):
 
         rows_v, bids_v, extras_v = [], [], []
         for v, gts in enumerate((gt_ori, gt_rot, gt_flp)):
-            r, b, e = self._view_tensors(head, stash, points, gts, v, n_img)
+            r, b, e = self._view_tensors(head, stash, main_ang, points, gts,
+                                         v, n_img)
             rows_v.append(r)
             bids_v.append(b)
             extras_v.append(e)

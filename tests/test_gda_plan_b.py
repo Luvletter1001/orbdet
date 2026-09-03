@@ -277,3 +277,42 @@ def test_b_t7_compact_by_bid_rank():
         [bids0[:0], bids1, bids2],
         [ext0[:0], ext1, ext2])
     assert keep_c == [] and rows3c.shape == (0, 3, 2)
+
+
+# ---------------------------------------------------------------- B-T8
+
+def test_b_t8_chamber_target_from_detached_main_angle():
+    """v1.1 3a: chamber target = bit of the detached main-head angle."""
+    import torch.nn.functional as F
+    from mmrotate.models.losses.orbdet_gda_probe_losses import \
+        OrbdetGDAProbeLoss
+    torch.manual_seed(5)
+    loss_mod = OrbdetGDAProbeLoss(w_env=0.0, w_xview=0.0, w_bit_gt=1.0,
+                                  w_bit_x=0.0)
+    m = 6
+    rows = torch.zeros(m, 3, 6)
+    rows[..., 1] = 2.0    # a = softplus(2) ~ 2.13 -> gate ~ 1
+    rows[..., 4] = 3.0    # logit0 >> logit1 -> always predicts class 0
+    rows[..., 5] = -3.0
+    rows = rows.requires_grad_(True)
+    # per-instance main-head sin(2*theta): instances 0,2 bit=1; 1,3,4
+    # bit=0; instance 5 sits on the orbit boundary (|0.1| < 0.3, masked)
+    col = torch.tensor([0.9, -0.9, 0.9, -0.9, -0.9, 0.1])
+    sin2_main3 = col[:, None].expand(m, 3).contiguous()
+    env3 = torch.rand(m, 3, 2) * 50 + 1
+    losses, diag = loss_mod(rows, env3, sin2_main3, torch.tensor(0.5))
+
+    # expected: gate ~ 1, per-view identical -> mean over 5 masked
+    # instances: targets [1,0,1,0,0], predictions all class 0
+    a = F.softplus(torch.tensor(2.0))
+    g = torch.sigmoid((a - loss_mod.a0) / loss_mod.tau)
+    logp = torch.log_softmax(torch.tensor([3.0, -3.0]), dim=-1)
+    ce = torch.stack([-logp[1], -logp[0], -logp[1], -logp[0], -logp[0]])
+    expected = (g * ce).mean()
+    assert torch.allclose(losses['gda_loss_bit'], expected, atol=1e-5), \
+        (losses['gda_loss_bit'].item(), expected.item())
+    assert abs(diag['gda_bit_acc'].item() - 0.6) < 1e-6  # 3/5 masked-in
+    # gradient flows only into the bit logits
+    losses['gda_loss_bit'].backward()
+    assert torch.all(rows.grad[:, :, :4] == 0)
+    assert torch.any(rows.grad[:, :, 4:6] != 0)

@@ -56,6 +56,7 @@ class H2RBoxGDAHead(H2RBoxV2Head):
         else:
             self.loss_gda_probe = None
         self._gda_probe_out: List[Tensor] = []
+        self._gda_main_angle: List[Tensor] = []
 
     # -- construction ----------------------------------------------------
 
@@ -116,8 +117,14 @@ class H2RBoxGDAHead(H2RBoxV2Head):
     def last_gda_probe(self) -> List[Tensor]:
         return self._gda_probe_out
 
+    @property
+    def last_gda_main_angle(self) -> List[Tensor]:
+        """Detached decoded baseline-head angle per level (train only)."""
+        return self._gda_main_angle
+
     def forward(self, x: Tuple[Tensor]) -> Tuple[List[Tensor], ...]:
         self._gda_probe_out = []
+        self._gda_main_angle = []
         return super().forward(x)
 
     def forward_single(self, x: Tensor, scale, stride) -> Tuple[Tensor, ...]:
@@ -126,4 +133,14 @@ class H2RBoxGDAHead(H2RBoxV2Head):
             feat = x.detach() if self.gda_cfg.get('detach_feats') else x
             probe = self.gda_probe_predictor(self.gda_probe_tower(feat))
             self._gda_probe_out.append(probe)
+            if self.training:
+                # Stash the baseline head's decoded angle (detached): the
+                # per-instance chamber anchor for probe loss term 3a.
+                # Decode is pointwise; reshape map <-> flat is exact.
+                angle_pred = outs[2]
+                n, e, hh, ww = angle_pred.shape
+                ang = self.angle_coder.decode(
+                    angle_pred.permute(0, 2, 3, 1).reshape(-1, e),
+                    keepdim=True).reshape(n, hh, ww, 1).permute(0, 3, 1, 2)
+                self._gda_main_angle.append(ang.detach())
         return outs

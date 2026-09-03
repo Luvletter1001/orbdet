@@ -7,22 +7,30 @@ object compaction; this module only sees the resulting per-object tensors.
 
 Three terms, all acting solely on the probe branch outputs:
 
-1. Envelope regression (every view): the HBox-derived envelope supervises
-   the V4 invariants of the predicted Sigma -- gauge-equivalent angle
-   encodings are never penalized (Gate-A test A7/A9).
+1. Envelope regression (tight views only: ori + flp): the HBox-derived
+   envelope supervises the V4 invariants of the predicted Sigma --
+   gauge-equivalent angle encodings are never penalized (Gate-A test
+   A7/A9).  The rot view's gt is a rotated HBox (a *loose* OBB whose
+   envelope is systematically too large), so it is excluded from
+   regression and only joins cross-view consistency.
 2. Cross-view envelope consistency: ``rotate_sigma``/``reflect_sigma``
    map the ori-view Sigma into the rotated/flipped frames; consistency is
    measured on envelopes only (V4-invariant ring).
-3. Chamber bit classification:
-   * GT-anchored: only where the GT encoding carries a reliable bit
-     (|sin 2*theta_gt| >= bit_min_abs_sin, which automatically excludes
-     the horizontal/vertical HBox views) AND softly gated by the detached
-     predicted anisotropy a (near-square instances get weight ~0 --
-     pre-registered B1/B2 motivation, no learnable confidence channel);
+3. Chamber bit classification (softly gated by the detached predicted
+   anisotropy a -- near-square instances get small weight, the
+   pre-registered B1/B2 motivation; no learnable confidence channel):
+   * main-head-anchored: per-instance target = chamber bit of the
+     *detached* baseline-head angle in the same view (empirically
+     correct on elongated instances; cross-head distillation cannot
+     self-reinforce).  Masked where |sin 2*theta_main| is small (the
+     main head's own orbit-boundary unreliability zone).
    * cross-view equivariant: targets generated from the *detached*
      ori-view prediction through the known view transform
-     (psi -> psi + 2*rot for rotation, psi -> -psi for reflection),
-     preventing self-reinforcement.
+     (psi -> psi + 2*rot for rotation, psi -> -psi for reflection).
+
+v1.1 note: an earlier GT-encoded chamber target (sign of sin(2*theta_gt)
+in the rot view) was dropped after the P0c smoke root-caused it as
+image-uniform under HBox supervision (theta_gt = rot for every object).
 
 Every returned loss is a scalar tensor; diagnostics carry no gradient and
 their names never contain 'loss' (logger-only, mmdet convention).
@@ -113,7 +121,7 @@ class OrbdetGDAProbeLoss(nn.Module):
 
     # -- main objective --------------------------------------------------
 
-    def forward(self, rows3: Tensor, env3: Tensor, sin2_gt3: Tensor,
+    def forward(self, rows3: Tensor, env3: Tensor, sin2_main3: Tensor,
                 rot: Tensor) -> Tuple[Dict[str, Tensor], Dict[str, Tensor]]:
         """Compute probe losses.
 
@@ -121,8 +129,14 @@ class OrbdetGDAProbeLoss(nn.Module):
             rows3 (Tensor): (M, 3, 6) probe rows, view dim order
                 (ori, rot, flp).
             env3 (Tensor): (M, 3, 2) GT-derived envelope targets (W, H)
-                per view.
-            sin2_gt3 (Tensor): (M, 3) sin(2*theta_gt) per view.
+                per view.  Only views 0 (ori) and 2 (flp) are used for
+                regression -- their HBox gt is tight; the rot view's gt
+                is a rotated HBox (a *loose* OBB), so the rot view only
+                participates in cross-view consistency (term 2).
+            sin2_main3 (Tensor): (M, 3) sin(2*theta_main) per view, from
+                the *detached* baseline-head angle -- the per-instance
+                chamber anchor (empirically reliable for elongated
+                instances, see the Gate-B evidence).
             rot (Tensor): scalar view rotation of the rot view.
 
         Returns:
@@ -146,12 +160,12 @@ class OrbdetGDAProbeLoss(nn.Module):
         sig_rot, _, _ = self.rows_to_sigma(rows_rot)
         sig_flp, _, _ = self.rows_to_sigma(rows_flp)
 
-        # 1. envelope regression against GT-derived envelopes, all views --
+        # 1. envelope regression against GT-derived envelopes, tight views
+        #    only (ori + flp; the rot view's rotated-HBox gt is loose).
         #    V4-invariant: gauge-equivalent encodings penalized identically.
         loss_env = (envelope_consistency_loss(sig_ori, env3[:, 0], self.beta)
-                    + envelope_consistency_loss(sig_rot, env3[:, 1], self.beta)
                     + envelope_consistency_loss(sig_flp, env3[:, 2],
-                                                self.beta)).mean() / 3.0
+                                                self.beta)).mean() / 2.0
 
         # 2. cross-view envelope consistency on the V4-invariant ring.
         w_env, h_env = envelope_from_sigma(rotate_sigma(sig_ori, rot))
@@ -170,22 +184,31 @@ class OrbdetGDAProbeLoss(nn.Module):
         logits_rot = rows_rot[:, 4:6]
         logits_flp = rows_flp[:, 4:6]
 
-        # 3a. GT-anchored bit: only where the GT encoding is reliable
-        #     (|sin 2*theta_gt| large enough) -- HBox views (theta_gt = 0)
-        #     are automatically masked out.
-        mask_gt = sin2_gt3[:, 1].abs() >= self.bit_min_abs_sin
-        if mask_gt.any():
-            tgt_gt = (sin2_gt3[mask_gt, 1] > 0).long()
-            ce = F.cross_entropy(logits_rot[mask_gt], tgt_gt,
-                                 reduction='none')
-            loss_bit_gt = (g[mask_gt] * ce).sum() / mask_gt.sum().clamp_min(
-                1).to(ce.dtype)
+        # 3a. main-head-anchored bit: per-instance target from the
+        #     detached baseline-head angle (the baseline is empirically
+        #     correct on elongated instances; Gate-B B2), in every view.
+        #     Masked where the main head itself sits near the orbit
+        #     boundary (|sin 2*theta_main| too small to be reliable).
+        loss_bit_gt = zero
+        bit_acc = zero.detach()
+        n_bit = 0
+        for v, logits_v in enumerate((logits_ori, logits_rot, logits_flp)):
+            s2 = sin2_main3[:, v]
+            mask_v = s2.abs() >= self.bit_min_abs_sin
+            if not mask_v.any():
+                continue
+            tgt_v = (s2[mask_v] > 0).long()
+            ce_v = F.cross_entropy(logits_v[mask_v], tgt_v,
+                                   reduction='none')
+            loss_bit_gt = loss_bit_gt + (g[mask_v] * ce_v).sum()
+            n_bit = n_bit + int(mask_v.sum())
             with torch.no_grad():
-                pred = logits_rot[mask_gt].argmax(dim=-1)
-                bit_acc = (pred == tgt_gt).to(ce.dtype).mean()
-        else:
-            loss_bit_gt = zero
-            bit_acc = zero.detach()
+                bit_acc = bit_acc + (
+                    logits_v[mask_v].argmax(dim=-1) == tgt_v).to(
+                        ce_v.dtype).sum()
+        if n_bit > 0:
+            loss_bit_gt = loss_bit_gt / n_bit
+            bit_acc = bit_acc / n_bit
 
         # 3b. cross-view equivariant bit (targets from detached ori pred).
         tgt_rot, tgt_flp = self.chamber_targets_xview(psi_ori.detach(), rot)
