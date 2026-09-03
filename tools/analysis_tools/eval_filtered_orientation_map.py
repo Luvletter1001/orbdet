@@ -31,12 +31,13 @@ from mmdet.structures.bbox import bbox2roi
 from mmrotate.models.losses.low_rank_orientation_evidence import (
     low_rank_channel_orientation_evidence)
 from mmrotate.structures import RotatedBoxes
+from mmrotate.structures.bbox import rbbox_overlaps
 from mmrotate.utils import register_all_modules
 
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from tools.analysis_tools.collect_low_rank_orientation_evidence import (  # noqa: E402
-    _box_tensor, _square_hboxes, _validate_grouped_holdout,
+    _box_tensor, _regularize_le90, _square_hboxes, _validate_grouped_holdout,
     build_roi_extractor, image_patch_axis, sha256_file)
 
 D = 180.0 / math.pi
@@ -78,6 +79,98 @@ def apply_filter(bboxes: torch.Tensor, scores: torch.Tensor,
         new_scores[flagged] = new_scores[flagged] * downweight
         return bboxes, new_scores, labels
     raise ValueError(f'unknown filter mode: {mode}')
+
+
+def _periodic_angle_error_deg(pred_angle: torch.Tensor,
+                              gt_angle: torch.Tensor) -> torch.Tensor:
+    """|wrap_pi(pred - gt)| in degrees, elementwise."""
+    err = torch.rad2deg(pred_angle - gt_angle)
+    return torch.abs((err + 90.0) % 180.0 - 90.0)
+
+
+def voc_ap(recalls: List[float], precisions: List[float]) -> float:
+    """11-point interpolated AP (VOC)."""
+    ap = 0.0
+    for level in [i / 10 for i in range(11)]:
+        p = max((p for r, p in zip(recalls, precisions) if r >= level),
+                default=0.0)
+        ap += p / 11.0
+    return ap
+
+
+def oriented_class_ap(gt_per_image: List[torch.Tensor],
+                      pred_entries: List[Dict], iou_thr: float,
+                      angle_thr: Optional[float]) -> Optional[float]:
+    """AP for one class; a detection is TP only if rotated IoU >= iou_thr
+    AND (when angle_thr is not None) period-180 angle error <= angle_thr."""
+    npos = sum(g.shape[0] for g in gt_per_image)
+    if npos == 0:
+        return None
+    matched = [torch.zeros(g.shape[0], dtype=torch.bool)
+               for g in gt_per_image]
+    ordered = sorted(pred_entries, key=lambda e: -e['score'])
+    tp, fp = [], []
+    for entry in ordered:
+        img = entry['image_index']
+        gts = gt_per_image[img]
+        if gts.shape[0] == 0:
+            tp.append(0.0)
+            fp.append(1.0)
+            continue
+        ious = rbbox_overlaps(
+            entry['bbox'].reshape(1, 5).to(torch.float32),
+            gts.to(torch.float32)).reshape(-1)
+        best = int(ious.argmax())
+        best_iou = float(ious[best])
+        ok = best_iou >= iou_thr and not bool(matched[img][best])
+        if ok and angle_thr is not None:
+            ok = bool(_periodic_angle_error_deg(
+                entry['bbox'][4:5], gts[best, 4:5])[0] <= angle_thr)
+        if ok:
+            matched[img][best] = True
+            tp.append(1.0)
+            fp.append(0.0)
+        else:
+            tp.append(0.0)
+            fp.append(1.0)
+    cum_tp = torch.tensor(tp).cumsum(0).tolist()
+    cum_fp = torch.tensor(fp).cumsum(0).tolist()
+    recalls = [t / npos for t in cum_tp]
+    precisions = [t / max(t + f, 1e-12) for t, f in zip(cum_tp, cum_fp)]
+    return voc_ap(recalls, precisions)
+
+
+def oriented_map(samples, pred_store, iou_thr: float,
+                 angle_thr: Optional[float], num_classes: int = 15):
+    """Oriented mAP over classes with GT. angle_thr=None reproduces the
+    standard IoU-only matching (sanity cross-check vs DOTAMetric)."""
+    gt_by_class: Dict[int, list] = {c: [] for c in range(num_classes)}
+    pred_by_class: Dict[int, list] = {c: [] for c in range(num_classes)}
+    for img, (sample, pred) in enumerate(zip(samples, pred_store)):
+        gt = sample.gt_instances
+        # long-edge (le90) canonical form: the same physical rectangle has two
+        # (w,h,theta) encodings 90 deg apart; without regularizing both sides
+        # the angle gate would punish geometrically identical boxes.
+        gt_boxes = _regularize_le90(
+            _box_tensor(gt.bboxes).detach().cpu().float())
+        gt_labels = gt.labels.detach().cpu()
+        for c in range(num_classes):
+            gt_by_class[c].append(gt_boxes[gt_labels == c])
+        pred_boxes = _regularize_le90(pred['bboxes'].float())
+        for c in range(num_classes):
+            keep = pred['labels'] == c
+            for box, score in zip(pred_boxes[keep],
+                                  pred['scores'][keep]):
+                pred_by_class[c].append(
+                    dict(image_index=img, bbox=box, score=float(score)))
+    per_class = {}
+    for c in range(num_classes):
+        ap = oriented_class_ap(
+            gt_by_class[c], pred_by_class[c], iou_thr, angle_thr)
+        if ap is not None:
+            per_class[c] = ap
+    overall = sum(per_class.values()) / len(per_class)
+    return overall, per_class
 
 
 def prediction_cues(pred_instances, scale_factor, features, image_index,
@@ -144,6 +237,10 @@ def parse_args(argv: Optional[Sequence[str]] = None):
     parser.add_argument('--rates', type=float, nargs='+',
                         default=[0.05, 0.10])
     parser.add_argument('--downweight', type=float, default=0.3)
+    parser.add_argument('--angle-thresholds', type=float, nargs='+',
+                        default=[15.0, 30.0],
+                        help='angle gates (deg) for orientation-sensitive AP; '
+                             'empty list disables')
     return parser.parse_args(argv)
 
 
@@ -292,12 +389,36 @@ def main():
                    for k, v in per_class[f'{cls_name}:{variant}'].items()},
                   flush=True)
 
+    # orientation-sensitive AP (IoU AND angle gate) for every variant
+    oriented = {}
+    if args.angle_thresholds:
+        variants = {'baseline': pred_store}
+        for rate in args.rates:
+            for mode in ('remove', 'downweight'):
+                variants[f'{mode}@{rate:g}'] = variant_preds(rate, mode)
+        # sanity: angle_thr=None must approximate the DOTAMetric baseline
+        sanity, _ = oriented_map(samples, pred_store, 0.5, None)
+        oriented['sanity_iou_only_baseline'] = sanity
+        print(f'[eval] oriented AP sanity (IoU-only) = {sanity:.4f} '
+              f'(DOTAMetric baseline '
+              f"{results['baseline'].get('dota/mAP', float('nan')):.4f})",
+              flush=True)
+        for thr in args.angle_thresholds:
+            for name, preds in variants.items():
+                overall, pc = oriented_map(samples, preds, 0.5, thr)
+                oriented[f'angle<={thr:g}:{name}'] = dict(
+                    overall=overall,
+                    per_class={str(k): v for k, v in pc.items()})
+                print(f'[eval] oriented AP (angle<={thr:g}) {name} -> '
+                      f'{overall:.4f}', flush=True)
+
     payload = dict(
         config=str(config_path), config_sha256=config_digest,
         checkpoint=str(checkpoint_path), checkpoint_sha256=checkpoint_digest,
         image_count=image_count, prediction_count=total_pred,
         rates=args.rates, downweight=args.downweight,
-        overall=results, per_class=per_class)
+        angle_thresholds=args.angle_thresholds,
+        overall=results, per_class=per_class, oriented=oriented)
     with output_path.open('x', encoding='utf-8') as stream:
         json.dump(payload, stream, ensure_ascii=False, indent=2,
                   sort_keys=True)
