@@ -1,0 +1,206 @@
+import json
+import math
+
+import pytest
+import torch
+
+from tools.analysis_tools import collect_low_rank_orientation_evidence as C
+
+
+def test_build_row_unique_identity_and_finite_scalars():
+    evidence = dict(
+        low_rank_angle=torch.tensor(0.1),
+        low_rank_confidence=torch.tensor(0.9),
+        low_rank_anisotropy=torch.tensor(0.8),
+        low_rank_energy=torch.tensor(1.5),
+        low_rank_valid=torch.tensor(True),
+        low_rank_sigma1=torch.tensor(2.0),
+        low_rank_sigma2=torch.tensor(0.1),
+        fpn_level=torch.tensor(2, dtype=torch.long))
+    geometry = dict(
+        gt_width=10.0,
+        gt_height=12.0,
+        gt_area=120.0,
+        gt_aspect_ratio=1.2)
+    match = dict(
+        pred_index=3,
+        pred_score=0.77,
+        rotated_iou=0.66,
+        pred_angle=0.10,
+        gt_angle=0.05,
+        e2_deg=2.86,
+        e4_deg=2.86)
+    row = C.build_row('run', 'IMG1', 0, 5, evidence, geometry, match)
+    assert (row['run_name'], row['image_id'],
+            row['gt_index']) == ('run', 'IMG1', 0)
+    assert row['label'] == 5
+    assert row['evidence_available'] is True
+    assert row['matched'] is True
+    assert type(row['low_rank_valid']) is bool
+    assert row['low_rank_valid'] is True
+    for key in (
+            'low_rank_angle', 'low_rank_confidence', 'low_rank_anisotropy',
+            'low_rank_energy', 'low_rank_sigma1', 'low_rank_sigma2'):
+        assert isinstance(row[key], float)
+        assert math.isfinite(row[key])
+    assert isinstance(row['fpn_level'], int)
+    assert row['large_angle_error'] is False
+    json.dumps(row, allow_nan=False)
+
+
+def test_build_row_marks_unavailable_and_unmatched():
+    row = C.build_row('run', 'IMG', 1, 0)
+    assert row['evidence_available'] is False
+    assert row['matched'] is False
+    assert not any(key.startswith('low_rank_') for key in row)
+    assert 'pred_index' not in row
+    json.dumps(row, allow_nan=False)
+
+
+def test_build_row_flags_large_angle_error():
+    match = dict(
+        pred_index=0,
+        pred_score=0.9,
+        rotated_iou=0.8,
+        pred_angle=0.0,
+        gt_angle=0.0,
+        e2_deg=20.0,
+        e4_deg=5.0)
+    row = C.build_row('run', 'IMG', 0, 0, None, None, match)
+    assert row['matched'] is True
+    assert row['large_angle_error'] is True
+
+
+def test_score_desc_one_to_one_matching_no_stealing():
+    gt = torch.tensor(
+        [[0., 0., 10., 10., 0.], [30., 0., 10., 10., 0.]],
+        dtype=torch.float32)
+    gt_labels = torch.tensor([0, 0])
+    # Shuffled input order: idx0 score .8 overlaps gt0 only; idx1 score .7
+    # matches the far gt1; idx2 score .9 matches gt0.
+    pred = torch.tensor(
+        [[0., 0., 9., 9., 0.], [30., 0., 10., 10., 0.],
+         [0., 0., 10., 10., 0.]],
+        dtype=torch.float32)
+    scores = torch.tensor([0.8, 0.7, 0.9])
+    labels = torch.tensor([0, 0, 0])
+    matches = C.match_rotated_predictions(
+        pred,
+        scores,
+        labels,
+        gt,
+        gt_labels,
+        score_threshold=0.05,
+        iou_threshold=0.5)
+    pair = {
+        int(g): int(p)
+        for g, p in zip(
+            matches['gt_index'].tolist(), matches['pred_index'].tolist())
+    }
+    # Highest score (idx2) claims gt0; gt0 is never stolen by the later idx0.
+    assert pair[0] == 2
+    assert pair[1] == 1
+    assert len(pair) == 2
+    assert matches['gt_index'].numel() == 2
+
+
+def test_matching_ignores_other_class_and_low_score():
+    gt = torch.tensor([[0., 0., 10., 10., 0.]], dtype=torch.float32)
+    gt_labels = torch.tensor([0])
+    pred = torch.tensor(
+        [[0., 0., 10., 10., 0.], [0., 0., 10., 10., 0.]],
+        dtype=torch.float32)
+    scores = torch.tensor([0.9, 0.01])
+    labels = torch.tensor([1, 0])  # idx0 wrong class, idx1 below score thr
+    matches = C.match_rotated_predictions(
+        pred,
+        scores,
+        labels,
+        gt,
+        gt_labels,
+        score_threshold=0.05,
+        iou_threshold=0.5)
+    assert matches['gt_index'].numel() == 0
+
+
+def test_le90_e2_period_pi_e4_period_half_pi():
+    gt = torch.tensor([0.0])
+    e2, e4 = C.e2_e4_deg(torch.tensor([math.radians(80.0)]), gt)
+    assert abs(float(e2) - 80.0) < 1e-4   # period pi
+    assert abs(float(e4) - 10.0) < 1e-4   # period pi/2
+    e2b, e4b = C.e2_e4_deg(torch.tensor([math.radians(-80.0)]), gt)
+    assert abs(float(e2b) - 80.0) < 1e-4
+    assert abs(float(e4b) - 10.0) < 1e-4
+
+
+def test_rejects_existing_outputs(tmp_path):
+    out = tmp_path / 'evidence.jsonl'
+    manifest = tmp_path / 'evidence.manifest.json'
+    C.reject_existing_outputs(out, manifest)  # absent -> fine
+    out.write_text('x')
+    with pytest.raises(FileExistsError):
+        C.reject_existing_outputs(out, manifest)
+    out.unlink()
+    manifest.write_text('x')
+    with pytest.raises(FileExistsError):
+        C.reject_existing_outputs(out, manifest)
+
+
+def test_manifest_records_all_hashes_and_thresholds(tmp_path):
+    cfg = tmp_path / 'cfg.py'
+    ckpt = tmp_path / 'ckpt.pth'
+    low_rank = tmp_path / 'low_rank.py'
+    holdout = tmp_path / 'holdout.json'
+    for path in (cfg, ckpt, low_rank, holdout):
+        path.write_text(path.name)
+    manifest = C.build_manifest(
+        run_name='r',
+        config_path=cfg,
+        checkpoint_path=ckpt,
+        low_rank_function_path=low_rank,
+        holdout_manifest_path=holdout,
+        output_path=tmp_path / 'evidence.jsonl',
+        score_threshold=0.05,
+        iou_threshold=0.50,
+        max_images=None,
+        image_count=8,
+        row_count=20,
+        matched_count=11,
+        valid_count=9)
+    for key in (
+            'config_sha256', 'checkpoint_sha256',
+            'low_rank_function_sha256', 'holdout_manifest_sha256'):
+        assert isinstance(manifest[key], str) and len(manifest[key]) == 64
+    assert manifest['score_threshold'] == 0.05
+    assert manifest['iou_threshold'] == 0.50
+    assert (manifest['row_count'], manifest['matched_count'],
+            manifest['valid_count']) == (20, 11, 9)
+
+
+def test_low_rank_roi_evidence_is_finite_and_level_in_range():
+    from mmrotate.utils import register_all_modules
+    from mmrotate.registry import MODELS
+    register_all_modules()
+    extractor = MODELS.build(
+        dict(
+            type='mmdet.SingleRoIExtractor',
+            roi_layer=dict(
+                type='RoIAlign', output_size=14, sampling_ratio=2),
+            out_channels=256,
+            featmap_strides=[8, 16, 32, 64, 128]))
+    torch.manual_seed(0)
+    features = tuple(
+        torch.randn(1, 256, size, size)
+        for size in (128, 64, 32, 16, 8))
+    hboxes = [torch.tensor([[10., 10., 90., 90.]])]
+    result = C.low_rank_evidence_for_hboxes(extractor, features, hboxes)
+    assert result['instance_index'].numel() == 1
+    idx = 0
+    for key in (
+            'low_rank_angle', 'low_rank_confidence', 'low_rank_anisotropy',
+            'low_rank_energy', 'low_rank_sigma1', 'low_rank_sigma2'):
+        value = float(result[key][idx])
+        assert math.isfinite(value)
+    level = int(result['fpn_level'][idx])
+    assert 0 <= level <= 4
+    assert result['low_rank_valid'].dtype == torch.bool
