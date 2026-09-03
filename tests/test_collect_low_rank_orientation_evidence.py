@@ -166,15 +166,62 @@ def test_manifest_records_all_hashes_and_thresholds(tmp_path):
         image_count=8,
         row_count=20,
         matched_count=11,
-        valid_count=9)
+        valid_count=9,
+        roi_mode='hbox')
     for key in (
             'config_sha256', 'checkpoint_sha256',
             'low_rank_function_sha256', 'holdout_manifest_sha256'):
         assert isinstance(manifest[key], str) and len(manifest[key]) == 64
     assert manifest['score_threshold'] == 0.05
     assert manifest['iou_threshold'] == 0.50
+    assert manifest['roi_mode'] == 'hbox'
     assert (manifest['row_count'], manifest['matched_count'],
             manifest['valid_count']) == (20, 11, 9)
+
+
+def test_square_hboxes_centered_with_max_side():
+    hboxes = torch.tensor(
+        [[10., 20., 110., 40.],   # 100 x 20 -> square side 100
+         [0., 0., 30., 70.]],     # 30 x 70  -> square side 70
+        dtype=torch.float32)
+    squares = C._square_hboxes(hboxes)
+    assert squares.shape == (2, 4)
+    # centers preserved
+    assert torch.allclose(
+        (squares[:, 0] + squares[:, 2]) / 2,
+        torch.tensor([60., 15.]))
+    assert torch.allclose(
+        (squares[:, 1] + squares[:, 3]) / 2,
+        torch.tensor([30., 35.]))
+    # side == max(width, height), both axes equal
+    assert torch.allclose(squares[:, 2] - squares[:, 0],
+                          torch.tensor([100., 70.]))
+    assert torch.allclose(squares[:, 3] - squares[:, 1],
+                          squares[:, 2] - squares[:, 0])
+    with pytest.raises(ValueError):
+        C._square_hboxes(torch.zeros(3, 5))
+
+
+def test_parse_args_roi_mode_default_and_explicit(tmp_path):
+    cfg = tmp_path / 'cfg.py'
+    ckpt = tmp_path / 'ckpt.pth'
+    out = tmp_path / 'evidence.jsonl'
+    base = [str(cfg), '--checkpoint', str(ckpt), '--run-name', 'r',
+            '--output', str(out)]
+    args = C.parse_args(base)
+    assert args.roi_mode == 'hbox'
+    args = C.parse_args(base + ['--roi-mode', 'square'])
+    assert args.roi_mode == 'square'
+    with pytest.raises(SystemExit):
+        C.parse_args(base + ['--roi-mode', 'rotated'])
+
+
+def test_feature_hboxes_rejects_unknown_roi_mode():
+    with pytest.raises(ValueError):
+        C._feature_hboxes_and_geometry([], roi_mode='rotated')
+    # default mode stays hbox and accepts empty input
+    hboxes, keep, geometries = C._feature_hboxes_and_geometry([])
+    assert hboxes == [] and keep == [] and geometries == []
 
 
 def test_low_rank_roi_evidence_is_finite_and_level_in_range():

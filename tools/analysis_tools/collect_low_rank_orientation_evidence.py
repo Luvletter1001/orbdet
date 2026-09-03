@@ -47,6 +47,7 @@ ROI_SAMPLING_RATIO = 2
 ROI_OUT_CHANNELS = 256
 FEATMAP_STRIDES = [8, 16, 32, 64, 128]
 MIN_BOX_SIZE = 2.0
+ROI_MODES = ('hbox', 'square')
 LARGE_ERROR_DEG = 15.0
 
 _BASE_ROW_KEYS = {
@@ -392,6 +393,28 @@ def _hbox_geometry(hboxes: torch.Tensor) -> List[Dict]:
     return geometries
 
 
+def _square_hboxes(hboxes: torch.Tensor) -> torch.Tensor:
+    """Replace each HBox by its centered square with side = max(width, height).
+
+    RoIAlign resamples every RoI to a fixed ``output_size`` square. For an
+    elongated [x0, y0, x1, y1] RoI the x/y resampling factors differ, which
+    amplifies the pooled gradient component along the HBox long side by
+    (W/H)**2 inside the structure tensor and flips the recovered axis by 90
+    degrees. Pooling a centered square keeps the resampling isotropic so the
+    low-rank axis reflects feature geometry rather than RoI shape.
+    """
+    if hboxes.ndim != 2 or hboxes.shape[1] != 4:
+        raise ValueError('hboxes must have shape [N, 4]')
+    center_x = (hboxes[:, 0] + hboxes[:, 2]) / 2
+    center_y = (hboxes[:, 1] + hboxes[:, 3]) / 2
+    half = torch.maximum(
+        hboxes[:, 2] - hboxes[:, 0], hboxes[:, 3] - hboxes[:, 1]) / 2
+    return torch.stack(
+        (center_x - half, center_y - half,
+         center_x + half, center_y + half),
+        dim=1)
+
+
 def build_roi_extractor():
     """Build the fixed GT-HBox FPN RoI extractor."""
     return MODELS.build(
@@ -462,8 +485,17 @@ def low_rank_evidence_for_hboxes(roi_extractor, features: Tuple[torch.Tensor,
         fpn_level=fpn_level.detach().long())
 
 
-def _feature_hboxes_and_geometry(feature_instances):
-    """Convert feature-space RBox GT to HBox, applying the size guard."""
+def _feature_hboxes_and_geometry(feature_instances, roi_mode: str = 'hbox'):
+    """Convert feature-space RBox GT to HBox, applying the size guard.
+
+    ``roi_mode='square'`` replaces each kept HBox by its centered square
+    (side = max(width, height)) before RoI extraction, removing the
+    anisotropic RoIAlign resampling that otherwise biases the low-rank
+    gradient statistics. Recorded geometry always describes the original
+    HBox regardless of the pooling mode.
+    """
+    if roi_mode not in ROI_MODES:
+        raise ValueError(f'roi_mode must be one of {ROI_MODES}')
     hboxes_per_image = []
     keep_indices = []
     geometries = []
@@ -481,7 +513,10 @@ def _feature_hboxes_and_geometry(feature_instances):
             & (width >= MIN_BOX_SIZE) & (height >= MIN_BOX_SIZE))
         keep = valid.nonzero(as_tuple=False).reshape(-1)
         keep_indices.append(keep)
-        hboxes_per_image.append(hboxes[keep])
+        kept = hboxes[keep]
+        if roi_mode == 'square':
+            kept = _square_hboxes(kept)
+        hboxes_per_image.append(kept)
         # rbox is referenced only to keep the original-space contract clear.
         del rbox
     return hboxes_per_image, keep_indices, geometries
@@ -561,6 +596,13 @@ def parse_args(argv: Optional[Sequence[str]] = None):
         '--score-threshold', type=_probability_argument, default=0.05)
     parser.add_argument(
         '--iou-threshold', type=_probability_argument, default=0.50)
+    parser.add_argument(
+        '--roi-mode',
+        choices=ROI_MODES,
+        default='hbox',
+        help="RoI geometry fed to RoIAlign: 'hbox' keeps the tight GT HBox; "
+             "'square' pools the centered square (side=max(W,H)) to avoid "
+             'anisotropic-resampling bias in the low-rank structure tensor')
     return parser.parse_args(argv)
 
 
@@ -589,7 +631,7 @@ def _validate_grouped_holdout(cfg) -> None:
 
 def _write_rows(stream, runner, model, roi_extractor, run_name: str,
                 max_images: Optional[int], score_threshold: float,
-                iou_threshold: float) -> Dict[str, int]:
+                iou_threshold: float, roi_mode: str) -> Dict[str, int]:
     image_count = row_count = matched_count = valid_count = 0
     collected_rows = []
     with torch.inference_mode():
@@ -621,7 +663,7 @@ def _write_rows(stream, runner, model, roi_extractor, run_name: str,
             feature_instances = _feature_space_gt_instances(samples)
             features = model.extract_feat(inputs)
             hboxes_per_image, keep_indices, geometries = (
-                _feature_hboxes_and_geometry(feature_instances))
+                _feature_hboxes_and_geometry(feature_instances, roi_mode))
             raw_evidence = low_rank_evidence_for_hboxes(
                 roi_extractor, features, hboxes_per_image)
             evidence_by_image = [dict() for _ in samples]
@@ -692,7 +734,7 @@ def _write_rows(stream, runner, model, roi_extractor, run_name: str,
 def build_manifest(*, run_name, config_path, checkpoint_path,
                    low_rank_function_path, holdout_manifest_path, output_path,
                    score_threshold, iou_threshold, max_images, image_count,
-                   row_count, matched_count, valid_count) -> Dict:
+                   row_count, matched_count, valid_count, roi_mode) -> Dict:
     """Assemble the immutable manifest with all frozen-input hashes."""
     def _digest(path):
         path = Path(path)
@@ -718,7 +760,8 @@ def build_manifest(*, run_name, config_path, checkpoint_path,
         image_count=int(image_count),
         row_count=int(row_count),
         matched_count=int(matched_count),
-        valid_count=int(valid_count))
+        valid_count=int(valid_count),
+        roi_mode=str(roi_mode))
     return manifest
 
 
@@ -793,6 +836,9 @@ def collect(args) -> Dict:
     max_images = args.max_images
     score_threshold = _finite_real(args.score_threshold, 'score_threshold')
     iou_threshold = _finite_real(args.iou_threshold, 'iou_threshold')
+    roi_mode = str(args.roi_mode)
+    if roi_mode not in ROI_MODES:
+        raise ValueError(f'roi_mode must be one of {ROI_MODES}')
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     config_digest = sha256_file(config_path)
@@ -826,7 +872,7 @@ def collect(args) -> Dict:
             with output_temp.open('x', encoding='utf-8') as stream:
                 counts = _write_rows(
                     stream, runner, model, roi_extractor, run_name,
-                    max_images, score_threshold, iou_threshold)
+                    max_images, score_threshold, iou_threshold, roi_mode)
                 stream.flush()
                 os.fsync(stream.fileno())
 
@@ -840,6 +886,7 @@ def collect(args) -> Dict:
             score_threshold=score_threshold,
             iou_threshold=iou_threshold,
             max_images=max_images,
+            roi_mode=roi_mode,
             **counts)
         # The content digest is computed on the staged temp file (same bytes
         # as the hard-linked release); record the final published path.
