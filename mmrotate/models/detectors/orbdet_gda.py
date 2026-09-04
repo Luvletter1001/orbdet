@@ -1,8 +1,10 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-"""OrbdetGDADetector: OrbdetV02Detector + GDA probe loss wiring (Plan-B).
+"""OrbdetGDADetector: OrbdetV02Detector + GDA auxiliary wiring (Plan-B).
 
-The detector adds nothing to the optimization of the baseline branches.
-It only:
+The detector does not replace or directly gate the baseline angle objective.
+With ``detach_feats=False`` the auxiliary gradients do reach the shared
+backbone/FPN, so this implementation is a coupled auxiliary regularizer, not a
+GDA inference head or direct main-loss denoiser. It:
 
 * stashes the rotated view's (rot, gt_instances) via a ``rotate_crop``
   override (no copy of the parent's ``loss`` body);
@@ -41,7 +43,7 @@ def decode_compacted_main_sin2(angle_coder, encoded3: Tensor) -> Tensor:
 def compact_probe_by_object(
         rows_v: List[Tensor], bids_v: List[Tensor],
         extras_v: List[Tensor]
-) -> Tuple[Tensor, Tensor, List[int]]:
+) -> Tuple[Tensor, Tensor, Tensor]:
     """Group per-point tensors by physical object across views.
 
     Args:

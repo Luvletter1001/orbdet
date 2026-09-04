@@ -459,6 +459,68 @@ def test_b_t9_orientation_agnostic_objects_contribute_no_probe_loss():
     assert torch.any(rows.grad[1] != 0)
 
 
+def test_b_t10_tiny_detector_loss_has_finite_probe_gradients():
+    from mmdet.structures import DetDataSample
+    from mmrotate.registry import MODELS
+    from mmrotate.structures.bbox import RotatedBoxes
+    from mmrotate.utils import register_all_modules
+    from mmengine.structures import InstanceData
+    from torch import nn
+    from torch.nn import functional as F
+    register_all_modules()
+
+    if MODELS.get('GDAUnitTestBackbone') is None:
+        @MODELS.register_module(name='GDAUnitTestBackbone')
+        class GDAUnitTestBackbone(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.proj = nn.Conv2d(3, 4, 1)
+
+            def forward(self, value):
+                value = self.proj(value)
+                return (F.adaptive_avg_pool2d(value, (4, 4)),
+                        F.adaptive_avg_pool2d(value, (2, 2)))
+
+    head_cfg = _tiny_head_cfg(
+        angle_coder=dict(
+            type='PSCCoder', angle_version='le90', dual_freq=False,
+            num_step=3, thr_mod=0),
+        rotation_agnostic_classes=[],
+        loss_symmetry_ss=dict(type='H2RBoxV2ConsistencyLoss'),
+        gda_probe=dict(
+            enabled=True,
+            detach_feats=False,
+            loss=dict(type='OrbdetGDAProbeLoss')))
+    model = MODELS.build(dict(
+        type='OrbdetGDADetector',
+        backbone=dict(type='GDAUnitTestBackbone'),
+        neck=None,
+        bbox_head=dict(type='H2RBoxGDAHead', **head_cfg),
+        crop_size=(32, 32),
+        view_range=(0.25, 0.75),
+        train_cfg=None,
+        test_cfg=dict(
+            nms_pre=100, score_thr=0.05, min_bbox_size=0,
+            nms=dict(type='nms_rotated', iou_threshold=0.1),
+            max_per_img=100)))
+    model.train()
+    sample = DetDataSample()
+    sample.gt_instances = InstanceData(
+        bboxes=RotatedBoxes(torch.tensor([[16., 16., 12., 6., 0.]])),
+        labels=torch.tensor([0], dtype=torch.long))
+    torch.manual_seed(10)
+
+    losses = model.loss(torch.randn(1, 3, 32, 32), [sample])
+    train_losses = [value for name, value in losses.items() if 'loss' in name]
+    assert train_losses
+    assert all(torch.isfinite(value).all() for value in train_losses)
+    sum(train_losses).backward()
+    probe_grads = [parameter.grad for name, parameter in model.named_parameters()
+                   if name.startswith('bbox_head.gda_probe')]
+    assert probe_grads and all(grad is not None for grad in probe_grads)
+    assert all(torch.isfinite(grad).all() for grad in probe_grads)
+
+
 # ---------------------------------------------------------------- B-T8
 
 def test_b_t8_chamber_target_from_detached_main_angle():

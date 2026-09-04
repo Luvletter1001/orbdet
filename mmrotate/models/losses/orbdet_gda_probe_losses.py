@@ -20,9 +20,10 @@ Three terms, all acting solely on the probe branch outputs:
    anisotropy a -- near-square instances get small weight, the
    pre-registered B1/B2 motivation; no learnable confidence channel):
    * main-head-anchored: per-instance target = chamber bit of the
-     *detached* baseline-head angle in the same view (empirically
-     correct on elongated instances; cross-head distillation cannot
-     self-reinforce).  Masked where |sin 2*theta_main| is small (the
+     *detached* baseline-head angle in the same view (empirically correct on
+     elongated instances). Detach blocks the same-step target gradient but
+     does not remove cross-iteration feedback through shared features. Masked
+     where |sin 2*theta_main| is small (the
      main head's own orbit-boundary unreliability zone).
    * cross-view equivariant: targets generated from the *detached*
      ori-view prediction through the known view transform
@@ -188,7 +189,8 @@ class OrbdetGDAProbeLoss(nn.Module):
             sin2_main3 (Tensor): (M, 3) sin(2*theta_main) per view, from
                 the *detached* baseline-head angle -- the per-instance
                 chamber anchor (empirically reliable for elongated
-                instances, see the Gate-B evidence).
+                instances, see the Gate-B evidence). This measures teacher
+                agreement, not ground-truth chamber correctness.
             rot (Tensor): scalar view rotation of the rot view.
             valid_object_mask (Tensor, optional): (M,) objects eligible for
                 orientation supervision. Rotation-agnostic classes are false.
