@@ -63,8 +63,11 @@ class OrbdetGDAProbeLoss(nn.Module):
         tau (float): Gate temperature.  Default 0.10.
         w_env, w_xview, w_bit_gt, w_bit_x (float): term weights.
         beta (float): Smooth-L1 beta for envelope terms.
-        bit_min_abs_sin (float): minimum |sin 2*theta_gt| for the
-            GT-anchored chamber target to be considered reliable.
+        bit_min_abs_sin (float): minimum |sin 2*theta_main| for the detached
+            main-head chamber target to be considered reliable.
+        t_min, t_max (float): smooth bounds for the log-scale coordinate.
+        u2_min_radius (float): radius below which the undefined double-angle
+            carrier uses a finite canonical fallback.
     """
 
     def __init__(self,
@@ -75,8 +78,15 @@ class OrbdetGDAProbeLoss(nn.Module):
                  w_bit_gt: float = 0.2,
                  w_bit_x: float = 0.1,
                  beta: float = 0.05,
-                 bit_min_abs_sin: float = 0.3):
+                 bit_min_abs_sin: float = 0.3,
+                 t_min: float = -6.0,
+                 t_max: float = 14.0,
+                 u2_min_radius: float = 1e-4):
         super().__init__()
+        if not t_min < 0 < t_max:
+            raise ValueError('t_min and t_max must straddle zero')
+        if u2_min_radius <= 0:
+            raise ValueError('u2_min_radius must be positive')
         self.a0 = float(a0)
         self.tau = float(tau)
         self.w_env = float(w_env)
@@ -85,11 +95,13 @@ class OrbdetGDAProbeLoss(nn.Module):
         self.w_bit_x = float(w_bit_x)
         self.beta = float(beta)
         self.bit_min_abs_sin = float(bit_min_abs_sin)
+        self.t_min = float(t_min)
+        self.t_max = float(t_max)
+        self.u2_min_radius = float(u2_min_radius)
 
     # -- representation helpers -----------------------------------------
 
-    @staticmethod
-    def rows_to_sigma(rows: Tensor) -> Tuple[Tensor, Tensor, Tensor]:
+    def rows_to_sigma(self, rows: Tensor) -> Tuple[Tensor, Tensor, Tensor]:
         """Probe rows (..., 6) -> (Sigma (...,2,2), a (...,), psi (...,)).
 
         ``a_raw`` is clamped to [-8, 8] before the softplus: entry-wise
@@ -98,9 +110,24 @@ class OrbdetGDAProbeLoss(nn.Module):
         ratio of e^8 ~ 2980).  Gradients vanish beyond the clamp, which
         is the intended safety behaviour.
         """
-        t = rows[..., 0]
+        raw_t = rows[..., 0]
+        # Legal boxes in a 1024-pixel frame occupy roughly
+        # log(w*h/12) in [-2.5, 11.4].  A smooth asymmetric bound with margin
+        # preserves unit slope at zero while preventing exp overflow.
+        t = torch.where(
+            raw_t >= 0,
+            self.t_max * torch.tanh(raw_t / self.t_max),
+            (-self.t_min) * torch.tanh(raw_t / (-self.t_min)))
         a = F.softplus(rows[..., 1].clamp(-8.0, 8.0))
-        psi = torch.atan2(rows[..., 3], rows[..., 2])
+        u2x, u2y = rows[..., 2], rows[..., 3]
+        radius_sq = u2x.square() + u2y.square()
+        valid = radius_sq >= self.u2_min_radius ** 2
+        # atan2(0, 0) has NaN derivatives.  The angle is undefined in this
+        # region, so use a canonical finite direction with zero local angle
+        # gradient until the probe leaves the safety ball.
+        safe_x = torch.where(valid, u2x, torch.ones_like(u2x))
+        safe_y = torch.where(valid, u2y, torch.zeros_like(u2y))
+        psi = torch.atan2(safe_y, safe_x)
         return tapsi_to_sigma(t, a, psi), a, psi
 
     def gate(self, a_detached: Tensor) -> Tensor:
@@ -153,7 +180,10 @@ class OrbdetGDAProbeLoss(nn.Module):
                 gda_loss_bit=zero)
             return losses, dict(
                 gda_gate_mean=zero.detach(), gda_bit_acc=zero.detach(),
-                gda_nobj=torch.zeros((), device=device))
+                gda_nobj=torch.zeros((), device=device),
+                gda_raw_t_min=zero.detach(), gda_raw_t_max=zero.detach(),
+                gda_u2_radius_mean=zero.detach(),
+                gda_u2_fallback_frac=zero.detach())
 
         rows_ori, rows_rot, rows_flp = rows3[:, 0], rows3[:, 1], rows3[:, 2]
         sig_ori, a_ori, psi_ori = self.rows_to_sigma(rows_ori)
@@ -224,5 +254,12 @@ class OrbdetGDAProbeLoss(nn.Module):
         diagnostics = dict(
             gda_gate_mean=g.mean().detach(),
             gda_bit_acc=bit_acc.detach(),
-            gda_nobj=torch.tensor(float(m), device=device).detach())
+            gda_nobj=torch.tensor(float(m), device=device).detach(),
+            gda_raw_t_min=rows3[..., 0].amin().detach(),
+            gda_raw_t_max=rows3[..., 0].amax().detach(),
+            gda_u2_radius_mean=torch.linalg.vector_norm(
+                rows3[..., 2:4], dim=-1).mean().detach(),
+            gda_u2_fallback_frac=(
+                torch.linalg.vector_norm(rows3[..., 2:4], dim=-1)
+                < self.u2_min_radius).to(rows3.dtype).mean().detach())
         return losses, diagnostics

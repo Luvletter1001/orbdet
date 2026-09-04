@@ -57,6 +57,37 @@ def test_b_t1_sigma_spd_and_losses_finite():
         assert v.item() == 0.0 and torch.isfinite(v).all()
 
 
+def test_b_t1_zero_u2_and_extreme_t_have_finite_forward_and_backward():
+    from mmrotate.models.losses.orbdet_gda_probe_losses import \
+        OrbdetGDAProbeLoss
+    loss_mod = OrbdetGDAProbeLoss()
+    raw_t = torch.tensor([-100., -20., 0., 20., 100.])
+    rows = torch.zeros(5, 3, 6)
+    rows[..., 0] = raw_t[:, None]
+    rows[..., 1] = -2.0
+    # Cover exact zero and radii on both sides of the intended 1e-4 safety
+    # boundary.  The old implementation evaluates atan2(0, 0).
+    rows[:, :, 2] = torch.tensor(
+        [0., 5e-5, 2e-4, -5e-5, -2e-4])[:, None]
+    rows = rows.requires_grad_(True)
+    sigma, _, _ = loss_mod.rows_to_sigma(rows.reshape(-1, 6))
+    env3 = torch.full((5, 3, 2), 20.0)
+    sin2_main3 = torch.ones(5, 3)
+    losses, diagnostics = loss_mod(
+        rows, env3, sin2_main3, torch.tensor(0.5))
+
+    assert torch.isfinite(sigma).all()
+    assert all(torch.isfinite(value).all() for value in losses.values())
+    for name in ('gda_raw_t_min', 'gda_raw_t_max',
+                 'gda_u2_radius_mean', 'gda_u2_fallback_frac'):
+        assert name in diagnostics
+        assert torch.isfinite(diagnostics[name]).all()
+
+    sum(losses.values()).backward()
+    assert rows.grad is not None
+    assert torch.isfinite(rows.grad).all()
+
+
 # ---------------------------------------------------------------- B-T2
 
 def test_b_t2_envelope_loss_view_rotation_equivariant():
