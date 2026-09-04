@@ -13,6 +13,9 @@ from .orbdet_anchored_symmetry_loss import OrbdetAnchoredSymmetryLoss
 from .orbdet_gda_probe_losses import OrbdetGDAProbeLoss
 from .orbdet_harmonic_consistency_loss import OrbdetHarmonicConsistencyLoss
 from .rotated_iou_loss import RotatedIoULoss
+from .scqo_harmonic_equivariance_loss import (
+    SCQOHarmonicEquivarianceLoss, decode_harmonic_angle,
+    induced_harmonic_action, normalize_harmonic)
 from .smooth_focal_loss import SmoothFocalLoss
 from .spatial_border_loss import SpatialBorderLoss
 
@@ -24,5 +27,3 @@ __all__ = [
     'low_rank_channel_orientation_evidence',
     'OrbdetAnchoredSymmetryLoss', 'OrbdetHarmonicConsistencyLoss',
     'GroupOrbitDeterminantalClusterLoss', 'build_planar_group_orbit',
-    'OrbdetGDAProbeLoss'
-]

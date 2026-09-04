@@ -1,0 +1,57 @@
+{
+  "evidence": [
+    "/data1/zcy/Orbdet/.worktrees/scqo-plan-a/resultmd/exp_scqo_plan_a_hrsc_le90_audit_20260817/godc_seed3407_best_le90.jsonl",
+    "/data1/zcy/Orbdet/.worktrees/scqo-plan-a/resultmd/exp_scqo_plan_a_hrsc_le90_audit_20260817/v02_seed3407_best_le90.jsonl"
+  ],
+  "runs": {
+    "godc_seed3407_best_le90": {
+      "eligible_rows": 444,
+      "gate_b": "INSUFFICIENT",
+      "reason": "need at least 60 eligible rows and 15 examples per class",
+      "reject_by_fpn": {
+        "0": {
+          "count": 50,
+          "reject_fraction": 0.0
+        },
+        "1": {
+          "count": 198,
+          "reject_fraction": 0.07575757575757576
+        },
+        "2": {
+          "count": 273,
+          "reject_fraction": 0.15018315018315018
+        },
+        "3": {
+          "count": 20,
+          "reject_fraction": 0.35
+        }
+      },
+      "total_rows": 541
+    },
+    "v02_seed3407_best_le90": {
+      "eligible_rows": 442,
+      "gate_b": "INSUFFICIENT",
+      "reason": "need at least 60 eligible rows and 15 examples per class",
+      "reject_by_fpn": {
+        "0": {
+          "count": 50,
+          "reject_fraction": 0.0
+        },
+        "1": {
+          "count": 198,
+          "reject_fraction": 0.07575757575757576
+        },
+        "2": {
+          "count": 273,
+          "reject_fraction": 0.15018315018315018
+        },
+        "3": {
+          "count": 20,
+          "reject_fraction": 0.35
+        }
+      },
+      "total_rows": 541
+    }
+  },
+  "schema_version": 1
+}

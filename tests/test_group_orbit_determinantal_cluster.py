@@ -10,6 +10,63 @@ def _loss_without_guards(**kwargs):
         energy_guard_weight=0.0, variance_guard_weight=0.0, **kwargs)
 
 
+def test_statistics_expose_one_value_per_orbit_and_match_forward():
+    features = torch.tensor([[[[1., 2.], [2., 1.]]],
+                             [[[1., 2.], [3., 5.]]]], requires_grad=True)
+    orbit = build_planar_group_orbit(features, 'c2')
+    loss_fn = GroupOrbitDeterminantalClusterLoss(
+        determinantal_weight=1.0,
+        spectral_tail_weight=0.5,
+        fixed_space_weight=0.25,
+        energy_guard_weight=0.0,
+        variance_guard_weight=0.0,
+        reduction='none')
+
+    stats = loss_fn.statistics(orbit)
+    actual = loss_fn(orbit)
+    expected = (stats['determinantal'] + 0.5 * stats['spectral_tail'] +
+                0.25 * stats['fixed_space'])
+
+    assert set(stats) == {
+        'determinantal', 'spectral_tail', 'fixed_space', 'q_gap', 'energy',
+        'variance', 'energy_guard', 'variance_guard'
+    }
+    for value in stats.values():
+        assert value.shape == (2, )
+    assert torch.allclose(actual, expected, atol=1e-7)
+
+    actual.sum().backward()
+    assert features.grad is not None
+    assert torch.isfinite(features.grad).all()
+
+
+def test_statistics_empty_batch_returns_empty_finite_vectors():
+    orbit = torch.randn(0, 2, 3, 4, 4)
+    stats = _loss_without_guards(reduction='none').statistics(orbit)
+
+    for value in stats.values():
+        assert value.shape == (0, )
+        assert torch.isfinite(value).all()
+
+
+def test_statistics_support_mask_matches_forward_masking():
+    features = torch.arange(32, dtype=torch.float32).reshape(2, 1, 4, 4)
+    orbit = build_planar_group_orbit(features, 'c2')
+    support_mask = torch.zeros(4, 4)
+    support_mask[1:3, 1:3] = 1.0
+    loss_fn = _loss_without_guards(
+        determinantal_weight=1.0,
+        spectral_tail_weight=0.0,
+        fixed_space_weight=1.0,
+        reduction='none')
+
+    stats = loss_fn.statistics(orbit, support_mask=support_mask)
+    actual = loss_fn(orbit, support_mask=support_mask)
+    expected = stats['determinantal'] + stats['fixed_space']
+
+    assert torch.allclose(actual, expected, atol=1e-7)
+
+
 def test_planar_group_orbits_have_exact_elements():
     x = torch.arange(1, 10, dtype=torch.float32).reshape(1, 1, 3, 3)
 

@@ -2,7 +2,7 @@
 """Group-orbit determinantal clustering primitives for Orbdet."""
 
 import math
-from typing import Optional, Union
+from typing import Dict, Optional, Union
 
 import torch
 from torch import Tensor
@@ -126,6 +126,20 @@ class GroupOrbitDeterminantalClusterLoss(torch.nn.Module):
         self.last_variance_guard = variance_guard.detach().mean()
         self.last_q_gap = q_gap.detach().mean()
 
+    def _validate_orbit(self, orbit: Tensor) -> None:
+        if not isinstance(orbit, Tensor):
+            raise TypeError('orbit must be a torch.Tensor')
+        if orbit.ndim < 3:
+            raise ValueError('orbit must have shape [N, K, ...]')
+        if orbit.shape[1] < 2:
+            raise ValueError('orbit group order K must be at least 2')
+        if any(size == 0 for size in orbit.shape[2:]):
+            raise ValueError('orbit members must have non-empty features')
+        if not orbit.is_floating_point():
+            raise TypeError('orbit must have a floating-point dtype')
+        if not bool(torch.isfinite(orbit).all()):
+            raise ValueError('orbit must contain only finite values')
+
     def _apply_support_mask(self, orbit: Tensor,
                             support_mask: Optional[Tensor]) -> Tensor:
         if support_mask is None:
@@ -205,38 +219,21 @@ class GroupOrbitDeterminantalClusterLoss(torch.nn.Module):
             raise ValueError('avg_factor must be positive')
         return loss.sum() / factor
 
-    def forward(self,
-                orbit: Tensor,
-                support_mask: Optional[Tensor] = None,
-                weight: Optional[Tensor] = None,
-                avg_factor: Optional[Union[float, Tensor]] = None,
-                reduction_override: Optional[str] = None) -> Tensor:
-        """Compute the loss for an orbit shaped ``[N, K, ...]``."""
-        if not isinstance(orbit, Tensor):
-            raise TypeError('orbit must be a torch.Tensor')
-        if orbit.ndim < 3:
-            raise ValueError('orbit must have shape [N, K, ...]')
-        if orbit.shape[1] < 2:
-            raise ValueError('orbit group order K must be at least 2')
-        if any(size == 0 for size in orbit.shape[2:]):
-            raise ValueError('orbit members must have non-empty features')
-        if not orbit.is_floating_point():
-            raise TypeError('orbit must have a floating-point dtype')
-        if not bool(torch.isfinite(orbit).all()):
-            raise ValueError('orbit must contain only finite values')
-        reduction = reduction_override or self.reduction
-        if reduction not in ('none', 'mean', 'sum'):
-            raise ValueError("reduction must be 'none', 'mean', or 'sum'")
-
+    def statistics(self,
+                   orbit: Tensor,
+                   support_mask: Optional[Tensor] = None) -> Dict[str, Tensor]:
+        """Return differentiable per-instance orbit statistics."""
+        self._validate_orbit(orbit)
         work_orbit = orbit
         if orbit.dtype in (torch.float16, torch.bfloat16):
             work_orbit = orbit.float()
         batch_size, group_order = work_orbit.shape[:2]
+        statistic_names = ('determinantal', 'spectral_tail', 'fixed_space',
+                           'q_gap', 'energy', 'variance', 'energy_guard',
+                           'variance_guard')
         if batch_size == 0:
-            self._reset_diagnostics(work_orbit)
-            if reduction == 'none':
-                return work_orbit.new_empty((0, ))
-            return work_orbit.sum() * 0.0
+            empty = work_orbit.new_empty((0, ))
+            return {name: empty.clone() for name in statistic_names}
 
         work_orbit = self._apply_support_mask(work_orbit, support_mask)
         matrix = work_orbit.reshape(batch_size, group_order, -1)
@@ -263,10 +260,50 @@ class GroupOrbitDeterminantalClusterLoss(torch.nn.Module):
         variance = matrix.var(dim=-1, unbiased=False).mean(dim=1)
         energy_guard = (self.min_energy - energy).clamp_min(0.0)
         variance_guard = (self.min_variance - variance).clamp_min(0.0)
+        return {
+            'determinantal': determinantal,
+            'spectral_tail': spectral_tail,
+            'fixed_space': fixed_space,
+            'q_gap': q_gap,
+            'energy': energy,
+            'variance': variance,
+            'energy_guard': energy_guard,
+            'variance_guard': variance_guard,
+        }
+
+    def forward(self,
+                orbit: Tensor,
+                support_mask: Optional[Tensor] = None,
+                weight: Optional[Tensor] = None,
+                avg_factor: Optional[Union[float, Tensor]] = None,
+                reduction_override: Optional[str] = None) -> Tensor:
+        """Compute the loss for an orbit shaped ``[N, K, ...]``."""
+        self._validate_orbit(orbit)
+        reduction = reduction_override or self.reduction
+        if reduction not in ('none', 'mean', 'sum'):
+            raise ValueError("reduction must be 'none', 'mean', or 'sum'")
+
+        work_orbit = orbit
+        if orbit.dtype in (torch.float16, torch.bfloat16):
+            work_orbit = orbit.float()
+        batch_size = work_orbit.shape[0]
+        if batch_size == 0:
+            self._reset_diagnostics(work_orbit)
+            if reduction == 'none':
+                return work_orbit.new_empty((0, ))
+            return work_orbit.sum() * 0.0
+
+        statistics = self.statistics(orbit, support_mask=support_mask)
+        determinantal = statistics['determinantal']
+        spectral_tail = statistics['spectral_tail']
+        fixed_space = statistics['fixed_space']
+        q_gap = statistics['q_gap']
+        energy_guard = statistics['energy_guard']
+        variance_guard = statistics['variance_guard']
         self._record_diagnostics(determinantal, spectral_tail, fixed_space,
                                  energy_guard, variance_guard, q_gap)
 
-        loss = matrix.new_zeros((batch_size, ))
+        loss = determinantal.new_zeros((batch_size, ))
         components = (
             (self.determinantal_weight, determinantal),
             (self.spectral_tail_weight, spectral_tail),
@@ -278,5 +315,5 @@ class GroupOrbitDeterminantalClusterLoss(torch.nn.Module):
             if component_weight > 0.0:
                 loss = loss + component_weight * component
 
-        sample_weight = self._prepare_weight(weight, matrix, batch_size)
+        sample_weight = self._prepare_weight(weight, determinantal, batch_size)
         return self._reduce(loss, sample_weight, reduction, avg_factor)

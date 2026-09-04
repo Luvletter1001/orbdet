@@ -1,0 +1,17 @@
+{
+  "checkpoint": "/data1/zcy/Orbdet/work_dirs/formal/orbdet_godc_c2_hrsc_clean_gpu89_seed3407_20260815/best_dota_mAP_epoch_24.pth",
+  "checkpoint_sha256": "77c124a71372ff1f58f96e3d9d2ce8b75dea0a9de2efbd78199e56c9a0917b74",
+  "config": "/data1/zcy/Orbdet/.worktrees/scqo-plan-a/configs/orbdet/orbdet_godc_c2_r50_hrsc_clean_gpu89.py",
+  "config_sha256": "a475727781323631b475c73ed7ae8d2f0fd285e7b2d48c4b5b3c780e8ddf0f19",
+  "image_count": 181,
+  "iou_threshold": 0.5,
+  "matched_count": 505,
+  "max_images": null,
+  "output": "/data1/zcy/Orbdet/.worktrees/scqo-plan-a/resultmd/exp_scqo_plan_a_hrsc_le90_audit_20260817/godc_seed3407_best_le90.jsonl",
+  "output_sha256": "395d2ce0839dae62d9a2788cb4fdd135b8eca728221e9db383a22801b830d9c4",
+  "row_count": 541,
+  "row_schema_version": 1,
+  "run_name": "godc_seed3407_best_le90",
+  "schema_version": 1,
+  "score_threshold": 0.05
+}

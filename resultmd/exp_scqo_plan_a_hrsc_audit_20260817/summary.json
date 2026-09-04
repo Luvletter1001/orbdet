@@ -1,0 +1,303 @@
+{
+  "evidence": [
+    "/data1/zcy/Orbdet/.worktrees/scqo-plan-a/resultmd/exp_scqo_plan_a_hrsc_audit_20260817/godc_seed3407_best.jsonl",
+    "/data1/zcy/Orbdet/.worktrees/scqo-plan-a/resultmd/exp_scqo_plan_a_hrsc_audit_20260817/v02_seed3407_best.jsonl"
+  ],
+  "runs": {
+    "godc_seed3407_best": {
+      "angle_error_e2": {
+        "mean": 45.998487925680294,
+        "median": 82.67613983154297,
+        "p90": 89.43315124511719,
+        "within_10": 0.4864864864864865,
+        "within_15": 0.4864864864864865,
+        "within_5": 0.46846846846846846
+      },
+      "angle_error_e4": {
+        "mean": 1.9795715234531845,
+        "median": 1.4153991341590881,
+        "p90": 4.318184947967529,
+        "within_10": 0.9954954954954955,
+        "within_15": 1.0,
+        "within_5": 0.9459459459459459
+      },
+      "aspect_ratio_auroc": 0.4523432423651722,
+      "auroc_gain": 0.10739522417154002,
+      "best_baseline_auroc": 0.44852582846003897,
+      "combined_auprc": 0.5935246722005276,
+      "combined_auroc": 0.555921052631579,
+      "combined_ece": 0.05937734523926667,
+      "combined_reliability": [
+        {
+          "confidence": null,
+          "count": 0,
+          "error_rate": null,
+          "lower": 0.0,
+          "upper": 0.1
+        },
+        {
+          "confidence": 0.18304697800185074,
+          "count": 3,
+          "error_rate": 0.6666666666666666,
+          "lower": 0.1,
+          "upper": 0.2
+        },
+        {
+          "confidence": 0.23853120965407276,
+          "count": 10,
+          "error_rate": 0.5,
+          "lower": 0.2,
+          "upper": 0.30000000000000004
+        },
+        {
+          "confidence": 0.3630228800000679,
+          "count": 45,
+          "error_rate": 0.4888888888888889,
+          "lower": 0.30000000000000004,
+          "upper": 0.4
+        },
+        {
+          "confidence": 0.45877659227585343,
+          "count": 117,
+          "error_rate": 0.4700854700854701,
+          "lower": 0.4,
+          "upper": 0.5
+        },
+        {
+          "confidence": 0.5510802855162953,
+          "count": 157,
+          "error_rate": 0.4585987261146497,
+          "lower": 0.5,
+          "upper": 0.6000000000000001
+        },
+        {
+          "confidence": 0.6391061284365578,
+          "count": 98,
+          "error_rate": 0.6326530612244898,
+          "lower": 0.6000000000000001,
+          "upper": 0.7000000000000001
+        },
+        {
+          "confidence": 0.7256342714441123,
+          "count": 14,
+          "error_rate": 0.7142857142857143,
+          "lower": 0.7000000000000001,
+          "upper": 0.8
+        },
+        {
+          "confidence": null,
+          "count": 0,
+          "error_rate": null,
+          "lower": 0.8,
+          "upper": 0.9
+        },
+        {
+          "confidence": null,
+          "count": 0,
+          "error_rate": null,
+          "lower": 0.9,
+          "upper": 1.0
+        }
+      ],
+      "eligible_rows": 444,
+      "energy_auroc": 0.44846491228070173,
+      "gate_b": "FAIL",
+      "large_error_rows": 228,
+      "reject_by_fpn": {
+        "0": {
+          "count": 50,
+          "reject_fraction": 0.0
+        },
+        "1": {
+          "count": 198,
+          "reject_fraction": 0.07575757575757576
+        },
+        "2": {
+          "count": 273,
+          "reject_fraction": 0.15018315018315018
+        },
+        "3": {
+          "count": 20,
+          "reject_fraction": 0.35
+        }
+      },
+      "small_error_rows": 216,
+      "stratified_aurocs": {
+        "area": [
+          0.5609756097560976,
+          0.6032967032967033,
+          0.48970588235294116
+        ],
+        "aspect_ratio": [
+          0.570854638422206,
+          0.47849264705882355,
+          0.5980870217554388
+        ],
+        "fpn_level": {
+          "0": 0.6258741258741258,
+          "1": 0.5929878048780488,
+          "2": 0.5148783406461906,
+          "3": 0.425
+        },
+        "label": {
+          "0": 0.555921052631579
+        },
+        "texture": [
+          0.40954819828059263,
+          0.608058608058608,
+          0.64320029563932
+        ]
+      },
+      "total_rows": 541,
+      "variance_auroc": 0.44852582846003897
+    },
+    "v02_seed3407_best": {
+      "angle_error_e2": {
+        "mean": 47.178814555383475,
+        "median": 85.3382453918457,
+        "p90": 89.64236068725586,
+        "within_10": 0.4751131221719457,
+        "within_15": 0.4751131221719457,
+        "within_5": 0.4457013574660634
+      },
+      "angle_error_e4": {
+        "mean": 1.714471220593516,
+        "median": 1.2164024710655212,
+        "p90": 3.5952111005783083,
+        "within_10": 0.995475113122172,
+        "within_15": 0.997737556561086,
+        "within_5": 0.9547511312217195
+      },
+      "aspect_ratio_auroc": 0.47988505747126436,
+      "auroc_gain": 0.13846469622331692,
+      "best_baseline_auroc": 0.40626026272578,
+      "combined_auprc": 0.5507169007136221,
+      "combined_auroc": 0.5447249589490969,
+      "combined_ece": 0.10219899404729786,
+      "combined_reliability": [
+        {
+          "confidence": 0.0815278850178022,
+          "count": 1,
+          "error_rate": 0.0,
+          "lower": 0.0,
+          "upper": 0.1
+        },
+        {
+          "confidence": null,
+          "count": 0,
+          "error_rate": null,
+          "lower": 0.1,
+          "upper": 0.2
+        },
+        {
+          "confidence": 0.27400763495563135,
+          "count": 18,
+          "error_rate": 0.3333333333333333,
+          "lower": 0.2,
+          "upper": 0.30000000000000004
+        },
+        {
+          "confidence": 0.36305615692276055,
+          "count": 69,
+          "error_rate": 0.4782608695652174,
+          "lower": 0.30000000000000004,
+          "upper": 0.4
+        },
+        {
+          "confidence": 0.4501421427679382,
+          "count": 104,
+          "error_rate": 0.5673076923076923,
+          "lower": 0.4,
+          "upper": 0.5
+        },
+        {
+          "confidence": 0.5477975651552424,
+          "count": 112,
+          "error_rate": 0.5357142857142857,
+          "lower": 0.5,
+          "upper": 0.6000000000000001
+        },
+        {
+          "confidence": 0.6412472260378053,
+          "count": 74,
+          "error_rate": 0.47297297297297297,
+          "lower": 0.6000000000000001,
+          "upper": 0.7000000000000001
+        },
+        {
+          "confidence": 0.7446667423290291,
+          "count": 51,
+          "error_rate": 0.6666666666666666,
+          "lower": 0.7000000000000001,
+          "upper": 0.8
+        },
+        {
+          "confidence": 0.8541997465892346,
+          "count": 13,
+          "error_rate": 0.38461538461538464,
+          "lower": 0.8,
+          "upper": 0.9
+        },
+        {
+          "confidence": null,
+          "count": 0,
+          "error_rate": null,
+          "lower": 0.9,
+          "upper": 1.0
+        }
+      ],
+      "eligible_rows": 442,
+      "energy_auroc": 0.40611658456486044,
+      "gate_b": "FAIL",
+      "large_error_rows": 232,
+      "reject_by_fpn": {
+        "0": {
+          "count": 50,
+          "reject_fraction": 0.0
+        },
+        "1": {
+          "count": 198,
+          "reject_fraction": 0.07575757575757576
+        },
+        "2": {
+          "count": 273,
+          "reject_fraction": 0.15018315018315018
+        },
+        "3": {
+          "count": 20,
+          "reject_fraction": 0.35
+        }
+      },
+      "small_error_rows": 210,
+      "stratified_aurocs": {
+        "area": [
+          0.4556489262371615,
+          0.599405425492382,
+          0.5711631363805277
+        ],
+        "aspect_ratio": [
+          0.48511415525114154,
+          0.5303703703703704,
+          0.5946360153256705
+        ],
+        "fpn_level": {
+          "0": 0.29218106995884774,
+          "1": 0.5258131487889274,
+          "2": 0.5822061191626409,
+          "3": 0.725
+        },
+        "label": {
+          "0": 0.5447249589490969
+        },
+        "texture": [
+          0.5473318713450293,
+          0.5485692771084337,
+          0.5370233246945576
+        ]
+      },
+      "total_rows": 541,
+      "variance_auroc": 0.40626026272578
+    }
+  },
+  "schema_version": 1
+}
