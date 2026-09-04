@@ -332,6 +332,49 @@ def test_b_t7_rebuilt_flip_ids_match_parent_integer_identity():
     assert torch.allclose(got, torch.tensor([1.6, 2.6, 3.6]))
 
 
+def test_b_t7_empty_intersection_keeps_every_view_in_autograd_graph():
+    from mmrotate.models.detectors.orbdet_gda import compact_probe_by_object
+    rows = [torch.randn(2, 6, requires_grad=True),
+            torch.randn(0, 6, requires_grad=True),
+            torch.randn(2, 6, requires_grad=True)]
+    bids = [torch.tensor([1.2, 2.2]), torch.empty(0),
+            torch.tensor([1.6, 2.6])]
+    extras = [torch.randn(2, 3, requires_grad=True),
+              torch.randn(0, 3, requires_grad=True),
+              torch.randn(2, 3, requires_grad=True)]
+
+    rows3, ext3, keys = compact_probe_by_object(rows, bids, extras)
+    assert rows3.shape == (0, 3, 6)
+    assert ext3.shape == (0, 3, 3)
+    assert torch.as_tensor(keys).numel() == 0
+    assert rows3.requires_grad and ext3.requires_grad
+    (rows3.sum() + ext3.sum()).backward()
+    assert all(value.grad is not None for value in rows + extras)
+
+
+def test_b_t9_orientation_agnostic_objects_contribute_no_probe_loss():
+    from mmrotate.models.losses.orbdet_gda_probe_losses import \
+        OrbdetGDAProbeLoss
+    torch.manual_seed(9)
+    loss_mod = OrbdetGDAProbeLoss()
+    rows = torch.randn(3, 3, 6, requires_grad=True)
+    env3 = torch.rand(3, 3, 2) * 50 + 1
+    sin2_main3 = torch.rand(3, 3) * 2 - 1
+    valid = torch.tensor([False, True, False])
+
+    masked, _ = loss_mod(
+        rows, env3, sin2_main3, torch.tensor(0.4),
+        valid_object_mask=valid)
+    reference, _ = loss_mod(
+        rows[1:2], env3[1:2], sin2_main3[1:2], torch.tensor(0.4))
+    for name in masked:
+        assert torch.allclose(masked[name], reference[name], atol=1e-6)
+
+    sum(masked.values()).backward()
+    assert torch.all(rows.grad[[0, 2]] == 0)
+    assert torch.any(rows.grad[1] != 0)
+
+
 # ---------------------------------------------------------------- B-T8
 
 def test_b_t8_chamber_target_from_detached_main_angle():

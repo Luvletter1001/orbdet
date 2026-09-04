@@ -39,6 +39,7 @@ import math
 from typing import Dict, Tuple
 
 import torch
+from mmdet.utils import reduce_mean
 from torch import Tensor, nn
 from torch.nn import functional as F
 
@@ -51,6 +52,29 @@ from mmrotate.registry import MODELS
 def _smooth_l1(x: Tensor, beta: float) -> Tensor:
     ax = x.abs()
     return torch.where(ax < beta, 0.5 * ax * ax / beta, ax - 0.5 * beta)
+
+
+def _ddp_weighted_mean(local_sum: Tensor, local_count: Tensor) -> Tensor:
+    """Return a DDP-correct global item mean from a differentiable local sum.
+
+    DDP averages parameter gradients across ranks.  Dividing each local sum
+    by the mean count per rank therefore yields the gradient of the global
+    item mean, including when a rank has zero local items.
+    """
+    mean_count = reduce_mean(
+        local_count.detach().to(device=local_sum.device,
+                                dtype=local_sum.dtype))
+    return local_sum / mean_count.clamp_min(1.0)
+
+
+def _distributed_stat_mean(local_sum: Tensor,
+                           local_count: Tensor) -> Tensor:
+    """Globally reduce a detached sum/count pair for rank-consistent logs."""
+    mean_sum = reduce_mean(local_sum.detach())
+    mean_count = reduce_mean(
+        local_count.detach().to(device=local_sum.device,
+                                dtype=local_sum.dtype))
+    return mean_sum / mean_count.clamp_min(1.0)
 
 
 @MODELS.register_module()
@@ -149,7 +173,8 @@ class OrbdetGDAProbeLoss(nn.Module):
     # -- main objective --------------------------------------------------
 
     def forward(self, rows3: Tensor, env3: Tensor, sin2_main3: Tensor,
-                rot: Tensor) -> Tuple[Dict[str, Tensor], Dict[str, Tensor]]:
+                rot: Tensor, valid_object_mask: Tensor = None
+                ) -> Tuple[Dict[str, Tensor], Dict[str, Tensor]]:
         """Compute probe losses.
 
         Args:
@@ -165,6 +190,8 @@ class OrbdetGDAProbeLoss(nn.Module):
                 chamber anchor (empirically reliable for elongated
                 instances, see the Gate-B evidence).
             rot (Tensor): scalar view rotation of the rot view.
+            valid_object_mask (Tensor, optional): (M,) objects eligible for
+                orientation supervision. Rotation-agnostic classes are false.
 
         Returns:
             tuple[dict, dict]: scalar losses (keys contain 'loss') and
@@ -172,18 +199,16 @@ class OrbdetGDAProbeLoss(nn.Module):
         """
         m = rows3.size(0)
         device = rows3.device
-        zero = rows3.sum() * 0.0
-        if m == 0:
-            losses = dict(
-                gda_loss_env=zero,
-                gda_loss_xview=zero,
-                gda_loss_bit=zero)
-            return losses, dict(
-                gda_gate_mean=zero.detach(), gda_bit_acc=zero.detach(),
-                gda_nobj=torch.zeros((), device=device),
-                gda_raw_t_min=zero.detach(), gda_raw_t_max=zero.detach(),
-                gda_u2_radius_mean=zero.detach(),
-                gda_u2_fallback_frac=zero.detach())
+        graph_zero = rows3.sum() * 0.0
+        if valid_object_mask is None:
+            valid_object_mask = torch.ones(m, dtype=torch.bool, device=device)
+        else:
+            valid_object_mask = valid_object_mask.to(
+                device=device, dtype=torch.bool)
+            if valid_object_mask.shape != (m,):
+                raise ValueError('valid_object_mask must have shape (M,)')
+        valid_weight = valid_object_mask.to(rows3.dtype)
+        object_count = valid_weight.sum()
 
         rows_ori, rows_rot, rows_flp = rows3[:, 0], rows3[:, 1], rows3[:, 2]
         sig_ori, a_ori, psi_ori = self.rows_to_sigma(rows_ori)
@@ -193,20 +218,27 @@ class OrbdetGDAProbeLoss(nn.Module):
         # 1. envelope regression against GT-derived envelopes, tight views
         #    only (ori + flp; the rot view's rotated-HBox gt is loose).
         #    V4-invariant: gauge-equivalent encodings penalized identically.
-        loss_env = (envelope_consistency_loss(sig_ori, env3[:, 0], self.beta)
-                    + envelope_consistency_loss(sig_flp, env3[:, 2],
-                                                self.beta)).mean() / 2.0
+        env_per_object = (
+            envelope_consistency_loss(sig_ori, env3[:, 0], self.beta)
+            + envelope_consistency_loss(sig_flp, env3[:, 2], self.beta)
+        ) / 2.0
+        loss_env = _ddp_weighted_mean(
+            (env_per_object * valid_weight).sum() + graph_zero,
+            object_count)
 
         # 2. cross-view envelope consistency on the V4-invariant ring.
         w_env, h_env = envelope_from_sigma(rotate_sigma(sig_ori, rot))
         w_tgt, h_tgt = envelope_from_sigma(sig_rot)
         loss_x_rot = (_smooth_l1(w_env - w_tgt, self.beta)
-                      + _smooth_l1(h_env - h_tgt, self.beta)).mean()
+                      + _smooth_l1(h_env - h_tgt, self.beta))
         w_env, h_env = envelope_from_sigma(reflect_sigma(sig_ori))
         w_tgt, h_tgt = envelope_from_sigma(sig_flp)
         loss_x_flp = (_smooth_l1(w_env - w_tgt, self.beta)
-                      + _smooth_l1(h_env - h_tgt, self.beta)).mean()
-        loss_xview = (loss_x_rot + loss_x_flp) / 2.0
+                      + _smooth_l1(h_env - h_tgt, self.beta))
+        xview_per_object = (loss_x_rot + loss_x_flp) / 2.0
+        loss_xview = _ddp_weighted_mean(
+            (xview_per_object * valid_weight).sum() + graph_zero,
+            object_count)
 
         # 3. chamber bit.  Soft gate from detached anisotropy.
         g = self.gate(a_ori.detach())  # (M,), no gradient by construction
@@ -219,47 +251,56 @@ class OrbdetGDAProbeLoss(nn.Module):
         #     correct on elongated instances; Gate-B B2), in every view.
         #     Masked where the main head itself sits near the orbit
         #     boundary (|sin 2*theta_main| too small to be reliable).
-        loss_bit_gt = zero
-        bit_acc = zero.detach()
-        n_bit = 0
-        for v, logits_v in enumerate((logits_ori, logits_rot, logits_flp)):
-            s2 = sin2_main3[:, v]
-            mask_v = s2.abs() >= self.bit_min_abs_sin
-            if not mask_v.any():
-                continue
-            tgt_v = (s2[mask_v] > 0).long()
-            ce_v = F.cross_entropy(logits_v[mask_v], tgt_v,
-                                   reduction='none')
-            loss_bit_gt = loss_bit_gt + (g[mask_v] * ce_v).sum()
-            n_bit = n_bit + int(mask_v.sum())
-            with torch.no_grad():
-                bit_acc = bit_acc + (
-                    logits_v[mask_v].argmax(dim=-1) == tgt_v).to(
-                        ce_v.dtype).sum()
-        if n_bit > 0:
-            loss_bit_gt = loss_bit_gt / n_bit
-            bit_acc = bit_acc / n_bit
+        logits3 = torch.stack((logits_ori, logits_rot, logits_flp), dim=1)
+        target3 = (sin2_main3 > 0).long()
+        mask3 = (sin2_main3.abs() >= self.bit_min_abs_sin) \
+            & valid_object_mask[:, None]
+        ce3 = F.cross_entropy(
+            logits3.reshape(-1, 2), target3.reshape(-1),
+            reduction='none').reshape(m, 3)
+        bit_count = mask3.to(rows3.dtype).sum()
+        loss_bit_gt = _ddp_weighted_mean(
+            (g[:, None] * ce3 * mask3.to(ce3.dtype)).sum() + graph_zero,
+            bit_count)
+        bit_correct_sum = (
+            (logits3.argmax(dim=-1) == target3) & mask3
+        ).to(rows3.dtype).sum()
+        bit_acc = _distributed_stat_mean(bit_correct_sum, bit_count)
 
         # 3b. cross-view equivariant bit (targets from detached ori pred).
         tgt_rot, tgt_flp = self.chamber_targets_xview(psi_ori.detach(), rot)
         ce_rot = F.cross_entropy(logits_rot, tgt_rot, reduction='none')
         ce_flp = F.cross_entropy(logits_flp, tgt_flp, reduction='none')
-        loss_bit_x = ((g * ce_rot).mean() + (g * ce_flp).mean()) / 2.0
+        bit_x_per_object = g * (ce_rot + ce_flp) / 2.0
+        loss_bit_x = _ddp_weighted_mean(
+            (bit_x_per_object * valid_weight).sum() + graph_zero,
+            object_count)
 
         losses = dict(
             gda_loss_env=self.w_env * loss_env,
             gda_loss_xview=self.w_xview * loss_xview,
             gda_loss_bit=self.w_bit_gt * loss_bit_gt
             + self.w_bit_x * loss_bit_x)
+        gate_mean = _distributed_stat_mean(
+            (g * valid_weight).sum(), object_count)
+        mean_object_count = reduce_mean(object_count.detach())
+        if m:
+            raw_t_min = rows3[..., 0].amin().detach()
+            raw_t_max = rows3[..., 0].amax().detach()
+            u2_radius = torch.linalg.vector_norm(rows3[..., 2:4], dim=-1)
+            u2_radius_mean = u2_radius.mean().detach()
+            u2_fallback_frac = (u2_radius < self.u2_min_radius).to(
+                rows3.dtype).mean().detach()
+        else:
+            raw_t_min = raw_t_max = graph_zero.detach()
+            u2_radius_mean = u2_fallback_frac = graph_zero.detach()
         diagnostics = dict(
-            gda_gate_mean=g.mean().detach(),
+            gda_gate_mean=gate_mean,
             gda_bit_acc=bit_acc.detach(),
-            gda_nobj=torch.tensor(float(m), device=device).detach(),
-            gda_raw_t_min=rows3[..., 0].amin().detach(),
-            gda_raw_t_max=rows3[..., 0].amax().detach(),
-            gda_u2_radius_mean=torch.linalg.vector_norm(
-                rows3[..., 2:4], dim=-1).mean().detach(),
-            gda_u2_fallback_frac=(
-                torch.linalg.vector_norm(rows3[..., 2:4], dim=-1)
-                < self.u2_min_radius).to(rows3.dtype).mean().detach())
+            gda_nobj=mean_object_count.detach(),
+            gda_nbit=reduce_mean(bit_count.detach()).detach(),
+            gda_raw_t_min=raw_t_min,
+            gda_raw_t_max=raw_t_max,
+            gda_u2_radius_mean=u2_radius_mean,
+            gda_u2_fallback_frac=u2_fallback_frac)
         return losses, diagnostics

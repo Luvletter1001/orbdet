@@ -56,9 +56,9 @@ def compact_probe_by_object(
     identity, rather than by the rank of surviving ids, is essential when an
     object has no positive point in one view.
 
-    Fully vectorized: per view one ``torch.unique`` + one
-    ``searchsorted`` + one ``index_reduce_`` (mirrors the baseline's
-    own compaction idiom), no per-object Python/kernel loop.
+    Fully vectorized: per view one ``torch.unique`` plus ``index_add_``
+    pooling, followed by on-device ``searchsorted`` intersections. There is
+    no per-object Python/kernel loop and no beta ``index_reduce_`` dependency.
     """
     n_views = len(rows_v)
     pooled_r, pooled_e, keys_v = [], [], []
@@ -74,11 +74,12 @@ def compact_probe_by_object(
             pooled_e.append(extras_v[v].sum(dim=0, keepdim=True)[:0])
             continue
         pr = rows_v[v].new_zeros((n_obj, rows_v[v].size(1)))
-        pr.index_reduce_(0, rank, rows_v[v], 'mean', include_self=False)
+        pr.index_add_(0, rank, rows_v[v])
         pe = extras_v[v].new_zeros((n_obj, extras_v[v].size(1)))
-        pe.index_reduce_(0, rank, extras_v[v], 'mean', include_self=False)
-        pooled_r.append(pr)
-        pooled_e.append(pe)
+        pe.index_add_(0, rank, extras_v[v])
+        counts = torch.bincount(rank, minlength=n_obj).clamp_min(1)
+        pooled_r.append(pr / counts[:, None].to(pr.dtype))
+        pooled_e.append(pe / counts[:, None].to(pe.dtype))
 
     common = keys_v[0]
     for keys in keys_v[1:]:
@@ -94,8 +95,9 @@ def compact_probe_by_object(
     c = rows_v[0].size(1)
     e = extras_v[0].size(1)
     if common.numel() == 0:
-        return (rows_v[0].new_zeros((0, n_views, c)),
-                extras_v[0].new_zeros((0, n_views, e)), common)
+        rows3 = torch.stack([pooled[:0] for pooled in pooled_r], dim=1)
+        ext3 = torch.stack([pooled[:0] for pooled in pooled_e], dim=1)
+        return rows3.reshape(0, n_views, c), ext3.reshape(0, n_views, e), common
     indices = [torch.searchsorted(keys, common) for keys in keys_v]
     rows3 = torch.stack(
         [pooled_r[v][indices[v]] for v in range(n_views)], dim=1)
@@ -141,8 +143,7 @@ class OrbdetGDADetector(OrbdetV02Detector):
     def _view_tensors(self, head, stash: List[Tensor],
                       main_ang: List[Tensor], points: List[Tensor],
                       gts: InstanceList, v: int, n_img: int):
-        """Per-view flattened probe rows, decoded-gt envelopes and the
-        detached main-head angle of positives."""
+        """Per-view probe rows, targets, main angle, and agnostic flag."""
         with torch.no_grad():
             labels_l, bbox_t_l, angle_t_l, bid_l = head.get_targets(
                 points, gts)
@@ -163,16 +164,21 @@ class OrbdetGDADetector(OrbdetV02Detector):
         rows = flat_rows[pos]
         bids = flat_bid[pos]
         if rows.numel() == 0:
-            return (flat_rows.new_zeros((0, flat_rows.size(1))),
-                    flat_bid.new_zeros((0,)), flat_rows.new_zeros((0, 3)))
+            return rows, bids, flat_rows.new_zeros((0, 4))
         pts = flat_points[pos]
         tgt = torch.cat([flat_bbox_t[pos], flat_angle_t[pos]], dim=-1)
         with torch.no_grad():
             dec = head.bbox_coder.decode(pts, tgt)  # (P, 5): x, y, w, h, th
             w_gt, h_gt, th_gt = dec[:, 2], dec[:, 3], dec[:, 4]
             env_w, env_h = envelope_from_wh_theta(w_gt, h_gt, th_gt)
-            extras = torch.stack(
-                [env_w, env_h, torch.sin(2.0 * flat_main[pos])], dim=-1)
+            if head.rotation_agnostic_classes:
+                is_agnostic = head._get_rotation_agnostic_mask(
+                    flat_labels[pos]).to(env_w.dtype)
+            else:
+                is_agnostic = torch.zeros_like(env_w)
+            extras = torch.stack([
+                env_w, env_h, torch.sin(2.0 * flat_main[pos]), is_agnostic
+            ], dim=-1)
         return rows, bids, extras
 
     # -- main hook -------------------------------------------------------
@@ -211,8 +217,10 @@ class OrbdetGDADetector(OrbdetV02Detector):
             extras_v.append(e)
 
         rows3, ext3, _ = compact_probe_by_object(rows_v, bids_v, extras_v)
-        loss_dict, diag = head.loss_gda_probe(rows3, ext3[..., :2],
-                                              ext3[..., 2], rot)
+        valid_object_mask = ~(ext3[..., 3] > 0.5).any(dim=1)
+        loss_dict, diag = head.loss_gda_probe(
+            rows3, ext3[..., :2], ext3[..., 2], rot,
+            valid_object_mask=valid_object_mask)
         losses.update(loss_dict)
         losses.update(diag)
         return losses
