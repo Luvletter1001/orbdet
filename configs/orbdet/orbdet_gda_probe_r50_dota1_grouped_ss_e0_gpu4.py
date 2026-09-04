@@ -1,8 +1,10 @@
-# GDA Plan-B P1 config: E0 baseline + parallel GDA probe head.
-# Single intended difference vs E0: detector/head type + gda_probe dict.
+# GDA Plan-B controlled candidate: single-GPU null control + GDA probe.
+# The only differences from the matching GPU4 control are the detector/head
+# type, gda_probe dict, and work directory.  Formal use requires a separate
+# bounded memory smoke and explicit authorization.
 # Training requires explicit per-round authorization (see
 # resultmd/exp_low_rank_orientation_evidence/gda_plan_b_implementation.md).
-_base_ = './orbdet_v0_2_r50_dota1_grouped_ss_e0_gpu89.py'
+_base_ = './orbdet_v0_2_r50_dota1_grouped_ss_e0_gpu4_control.py'
 
 model = dict(
     type='OrbdetGDADetector',
