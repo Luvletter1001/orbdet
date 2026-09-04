@@ -135,7 +135,11 @@ class H2RBoxGDAHead(H2RBoxV2Head):
 
     @property
     def last_gda_main_angle(self) -> List[Tensor]:
-        """Detached decoded baseline-head angle per level (train only)."""
+        """Detached baseline-head angle encoding per level (train only).
+
+        The detector mean-pools these encodings per physical object before
+        decoding, exactly matching the parent self-supervision path.
+        """
         return self._gda_main_angle
 
     def forward(self, x: Tuple[Tensor]) -> Tuple[List[Tensor], ...]:
@@ -162,13 +166,7 @@ class H2RBoxGDAHead(H2RBoxV2Head):
         if self.gda_cfg.get('enabled') and self.training:
             probe = self._forward_gda_probe_single(x)
             self._gda_probe_out.append(probe)
-            # Stash the baseline head's decoded angle (detached): the
-            # per-instance chamber anchor for probe loss term 3a.
-            # Decode is pointwise; reshape map <-> flat is exact.
-            angle_pred = outs[2]
-            n, e, hh, ww = angle_pred.shape
-            ang = self.angle_coder.decode(
-                angle_pred.permute(0, 2, 3, 1).reshape(-1, e),
-                keepdim=True).reshape(n, hh, ww, 1).permute(0, 3, 1, 2)
-            self._gda_main_angle.append(ang.detach())
+            # Preserve the parent's semantics: compact encoded point outputs
+            # by object first, then decode the compacted encoding.
+            self._gda_main_angle.append(outs[2].detach())
         return outs

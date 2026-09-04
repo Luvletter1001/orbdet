@@ -311,6 +311,45 @@ def test_b_t6_probe_construction_preserves_shared_initialization_rng():
         assert torch.equal(value, child_state[name]), name
 
 
+def test_b_t6_stashes_main_psc_encoding_before_object_mean_decode():
+    from mmrotate.utils import register_all_modules
+    register_all_modules()
+    from mmrotate.models.dense_heads.h2rbox_gda_head import H2RBoxGDAHead
+    cfg = _tiny_head_cfg(
+        angle_coder=dict(
+            type='PSCCoder', angle_version='le90', dual_freq=False,
+            num_step=3, thr_mod=0),
+        gda_probe=dict(enabled=True, detach_feats=True))
+    head = H2RBoxGDAHead(**cfg)
+    head.train()
+    feats = [torch.randn(1, 4, 8, 8), torch.randn(1, 4, 4, 4)]
+    outputs = head(feats)
+
+    assert len(head.last_gda_main_angle) == len(feats)
+    for encoded, predicted in zip(head.last_gda_main_angle, outputs[2]):
+        assert encoded.shape[1] == head.angle_coder.encode_size
+        assert torch.equal(encoded, predicted.detach())
+
+
+def test_b_t6_main_teacher_decodes_after_pooling_psc_encodings():
+    from mmrotate.models.detectors.orbdet_gda import \
+        decode_compacted_main_sin2
+    from mmrotate.models.task_modules.coders.angle_coder import PSCCoder
+    coder = PSCCoder(
+        angle_version='le90', dual_freq=False, num_step=3, thr_mod=0)
+    point_angles = torch.tensor([[0.2], [1.0]])
+    point_encodings = coder.encode(point_angles)
+    pooled = point_encodings.mean(dim=0).reshape(1, 1, -1)
+
+    got = decode_compacted_main_sin2(coder, pooled)
+    expected = torch.sin(2.0 * coder.decode(
+        pooled.reshape(-1, coder.encode_size))).reshape(1, 1)
+    old_order = torch.sin(2.0 * coder.decode(point_encodings)).mean()
+
+    assert torch.allclose(got, expected)
+    assert not torch.allclose(got.squeeze(), old_order)
+
+
 # ---------------------------------------------------------------- B-T7
 
 def test_b_t7_compacts_by_true_bid_identity_when_middle_object_is_missing():

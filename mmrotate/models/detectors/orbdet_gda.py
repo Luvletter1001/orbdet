@@ -29,6 +29,15 @@ from mmrotate.registry import MODELS
 from .orbdet_v0_2 import OrbdetV02Detector
 
 
+def decode_compacted_main_sin2(angle_coder, encoded3: Tensor) -> Tensor:
+    """Decode mean-pooled main-head encodings and return sin(2*theta)."""
+    if encoded3.size(-1) != angle_coder.encode_size:
+        raise ValueError('encoded3 last dimension must match angle coder')
+    angles = angle_coder.decode(
+        encoded3.reshape(-1, angle_coder.encode_size), keepdim=False)
+    return torch.sin(2.0 * angles).reshape(encoded3.shape[:-1])
+
+
 def compact_probe_by_object(
         rows_v: List[Tensor], bids_v: List[Tensor],
         extras_v: List[Tensor]
@@ -158,13 +167,15 @@ class OrbdetGDADetector(OrbdetV02Detector):
         ])
         flat_main = torch.cat([
             main_ang[l][v * n_img:(v + 1) * n_img].permute(
-                0, 2, 3, 1).reshape(-1) for l in range(len(main_ang))
+                0, 2, 3, 1).reshape(-1, main_ang[l].size(1))
+            for l in range(len(main_ang))
         ])
         pos = (flat_labels >= 0) & (flat_labels < head.num_classes)
         rows = flat_rows[pos]
         bids = flat_bid[pos]
         if rows.numel() == 0:
-            return rows, bids, flat_rows.new_zeros((0, 4))
+            n_extra = 3 + head.angle_coder.encode_size
+            return rows, bids, flat_rows.new_zeros((0, n_extra))
         pts = flat_points[pos]
         tgt = torch.cat([flat_bbox_t[pos], flat_angle_t[pos]], dim=-1)
         with torch.no_grad():
@@ -176,8 +187,9 @@ class OrbdetGDADetector(OrbdetV02Detector):
                     flat_labels[pos]).to(env_w.dtype)
             else:
                 is_agnostic = torch.zeros_like(env_w)
-            extras = torch.stack([
-                env_w, env_h, torch.sin(2.0 * flat_main[pos]), is_agnostic
+            extras = torch.cat([
+                env_w[:, None], env_h[:, None], flat_main[pos],
+                is_agnostic[:, None]
             ], dim=-1)
         return rows, bids, extras
 
@@ -217,9 +229,14 @@ class OrbdetGDADetector(OrbdetV02Detector):
             extras_v.append(e)
 
         rows3, ext3, _ = compact_probe_by_object(rows_v, bids_v, extras_v)
-        valid_object_mask = ~(ext3[..., 3] > 0.5).any(dim=1)
+        angle_dim = head.angle_coder.encode_size
+        encoded_main3 = ext3[..., 2:2 + angle_dim]
+        sin2_main3 = decode_compacted_main_sin2(
+            head.angle_coder, encoded_main3)
+        valid_object_mask = ~(
+            ext3[..., 2 + angle_dim] > 0.5).any(dim=1)
         loss_dict, diag = head.loss_gda_probe(
-            rows3, ext3[..., :2], ext3[..., 2], rot,
+            rows3, ext3[..., :2], sin2_main3, rot,
             valid_object_mask=valid_object_mask)
         losses.update(loss_dict)
         losses.update(diag)
