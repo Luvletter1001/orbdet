@@ -233,7 +233,8 @@ def test_b_t6_head_parity_and_detach_isolation():
             assert torch.equal(lp, lc), 'probe-off must be bit-identical'
     assert child_off.last_gda_probe == []
 
-    # probe enabled: baseline outputs still identical, probe stashed.
+    # Probe enabled: ordinary eval keeps baseline outputs identical and must
+    # not execute/stash the analysis-only probe.
     # init_weights is exercised explicitly (ConvModule-with-norm convs
     # have bias=None -- a crash surface that broke the first smoke).
     cfg = _tiny_head_cfg(gda_probe=dict(enabled=True, detach_feats=True))
@@ -246,8 +247,13 @@ def test_b_t6_head_parity_and_detach_isolation():
     for op, oc in zip(outs_p, outs_c2):
         for lp, lc in zip(op, oc):
             assert torch.equal(lp, lc), 'baseline outputs must be untouched'
-    assert len(child_on.last_gda_probe) == 2
-    assert child_on.last_gda_probe[0].shape[1] == 6
+    assert child_on.last_gda_probe == []
+
+    # Explicit analysis is the only eval-time path that emits probe maps.
+    with torch.no_grad():
+        probe_maps = child_on.forward_gda_probe(feats)
+    assert len(probe_maps) == 2
+    assert probe_maps[0].shape[1] == 6
 
     # detach_feats: a probe-only backward reaches no parent weight
     child_on.train()
@@ -264,6 +270,45 @@ def test_b_t6_head_parity_and_detach_isolation():
     assert any(p.grad is not None and torch.any(p.grad != 0)
                for n, p in child_on.named_parameters()
                if n.startswith('gda_probe')), 'probe tower must train'
+
+
+def test_b_t6_ordinary_eval_never_executes_probe_tower(monkeypatch):
+    from mmrotate.models.dense_heads.h2rbox_gda_head import H2RBoxGDAHead
+    child = H2RBoxGDAHead(**_tiny_head_cfg(
+        gda_probe=dict(enabled=True, detach_feats=True)))
+    child.eval()
+    feats = [torch.randn(1, 4, 8, 8), torch.randn(1, 4, 4, 4)]
+    calls = []
+    original = child.gda_probe_tower.forward
+
+    def counted_forward(value):
+        calls.append(value.shape)
+        return original(value)
+
+    monkeypatch.setattr(child.gda_probe_tower, 'forward', counted_forward)
+    with torch.no_grad():
+        child(feats)
+    assert calls == []
+    with torch.no_grad():
+        child.forward_gda_probe(feats)
+    assert len(calls) == len(feats)
+
+
+def test_b_t6_probe_construction_preserves_shared_initialization_rng():
+    from mmrotate.models.dense_heads.h2rbox_gda_head import H2RBoxGDAHead
+    from mmrotate.models.dense_heads.h2rbox_v2_head import H2RBoxV2Head
+
+    torch.manual_seed(46)
+    parent = H2RBoxV2Head(**_tiny_head_cfg())
+    parent.init_weights()
+    torch.manual_seed(46)
+    child = H2RBoxGDAHead(**_tiny_head_cfg(
+        gda_probe=dict(enabled=True, detach_feats=True)))
+    child.init_weights()
+
+    child_state = child.state_dict()
+    for name, value in parent.state_dict().items():
+        assert torch.equal(value, child_state[name]), name
 
 
 # ---------------------------------------------------------------- B-T7

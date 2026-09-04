@@ -20,8 +20,8 @@ Design contract (pinned by tests/test_gda_plan_b.py):
 * ``gda_probe.detach_feats=True`` detaches the FPN input of the probe
   tower, giving the ablation arm where no probe gradient can reach the
   shared backbone/neck.
-* The probe never participates in inference; ``predict`` behaviour is
-  inherited unchanged.
+* Ordinary inference skips the probe entirely; analysis code must call
+  ``forward_gda_probe`` explicitly.
 """
 from typing import List, Tuple
 
@@ -72,28 +72,44 @@ class H2RBoxGDAHead(H2RBoxV2Head):
             num_groups //= 2
         norm_cfg = dict(type='GN', num_groups=num_groups, requires_grad=True)
         act_cfg = dict(type='ReLU')
-        self.gda_probe_tower = nn.Sequential(
-            ConvModule(
-                self.in_channels,
-                self.feat_channels,
-                3,
-                padding=1,
-                norm_cfg=norm_cfg,
-                act_cfg=act_cfg),
-            ConvModule(
-                self.feat_channels,
-                self.feat_channels,
-                3,
-                padding=1,
-                norm_cfg=norm_cfg,
-                act_cfg=act_cfg))
-        self.gda_probe_predictor = nn.Conv2d(
-            self.feat_channels, GDA_PROBE_CHANNELS, 3, padding=1)
+        # Module constructors initialize parameters immediately. Preserve the
+        # global RNG stream so adding the probe does not change the baseline
+        # head's later init_weights result under the same seed.
+        with torch.random.fork_rng(devices=[]):
+            self.gda_probe_tower = nn.Sequential(
+                ConvModule(
+                    self.in_channels,
+                    self.feat_channels,
+                    3,
+                    padding=1,
+                    norm_cfg=norm_cfg,
+                    act_cfg=act_cfg),
+                ConvModule(
+                    self.feat_channels,
+                    self.feat_channels,
+                    3,
+                    padding=1,
+                    norm_cfg=norm_cfg,
+                    act_cfg=act_cfg))
+            self.gda_probe_predictor = nn.Conv2d(
+                self.feat_channels, GDA_PROBE_CHANNELS, 3, padding=1)
 
     def init_weights(self):
-        super().init_weights()
         if not self.gda_cfg.get('enabled'):
-            return
+            return super().init_weights()
+        # BaseModule's generic Conv initializer traverses every registered
+        # child before applying named overrides such as ``conv_cls``. If the
+        # probe remains registered, its random draws shift those baseline
+        # overrides even under the same seed. Temporarily exclude only the
+        # probe modules, initialize the untouched parent graph, then restore
+        # and initialize the probe from the subsequent RNG stream.
+        tower = self._modules.pop('gda_probe_tower')
+        predictor = self._modules.pop('gda_probe_predictor')
+        try:
+            super().init_weights()
+        finally:
+            self.add_module('gda_probe_tower', tower)
+            self.add_module('gda_probe_predictor', predictor)
         for m in self.gda_probe_tower.modules():
             if isinstance(m, nn.Conv2d):
                 nn.init.normal_(m.weight, mean=0, std=0.01)
@@ -127,20 +143,32 @@ class H2RBoxGDAHead(H2RBoxV2Head):
         self._gda_main_angle = []
         return super().forward(x)
 
+    def _forward_gda_probe_single(self, x: Tensor) -> Tensor:
+        feat = x.detach() if self.gda_cfg.get('detach_feats') else x
+        return self.gda_probe_predictor(self.gda_probe_tower(feat))
+
+    def forward_gda_probe(self, x: Tuple[Tensor]) -> List[Tensor]:
+        """Explicitly emit probe maps for analysis outside ordinary predict."""
+        if not self.gda_enabled:
+            self._gda_probe_out = []
+            return []
+        self._gda_probe_out = [
+            self._forward_gda_probe_single(feat) for feat in x
+        ]
+        return self._gda_probe_out
+
     def forward_single(self, x: Tensor, scale, stride) -> Tuple[Tensor, ...]:
         outs = super().forward_single(x, scale, stride)
-        if self.gda_cfg.get('enabled'):
-            feat = x.detach() if self.gda_cfg.get('detach_feats') else x
-            probe = self.gda_probe_predictor(self.gda_probe_tower(feat))
+        if self.gda_cfg.get('enabled') and self.training:
+            probe = self._forward_gda_probe_single(x)
             self._gda_probe_out.append(probe)
-            if self.training:
-                # Stash the baseline head's decoded angle (detached): the
-                # per-instance chamber anchor for probe loss term 3a.
-                # Decode is pointwise; reshape map <-> flat is exact.
-                angle_pred = outs[2]
-                n, e, hh, ww = angle_pred.shape
-                ang = self.angle_coder.decode(
-                    angle_pred.permute(0, 2, 3, 1).reshape(-1, e),
-                    keepdim=True).reshape(n, hh, ww, 1).permute(0, 3, 1, 2)
-                self._gda_main_angle.append(ang.detach())
+            # Stash the baseline head's decoded angle (detached): the
+            # per-instance chamber anchor for probe loss term 3a.
+            # Decode is pointwise; reshape map <-> flat is exact.
+            angle_pred = outs[2]
+            n, e, hh, ww = angle_pred.shape
+            ang = self.angle_coder.decode(
+                angle_pred.permute(0, 2, 3, 1).reshape(-1, e),
+                keepdim=True).reshape(n, hh, ww, 1).permute(0, 3, 1, 2)
+            self._gda_main_angle.append(ang.detach())
         return outs
