@@ -27,3 +27,7 @@ __all__ = [
     'low_rank_channel_orientation_evidence',
     'OrbdetAnchoredSymmetryLoss', 'OrbdetHarmonicConsistencyLoss',
     'GroupOrbitDeterminantalClusterLoss', 'build_planar_group_orbit',
+    'OrbdetGDAProbeLoss',
+    'SCQOHarmonicEquivarianceLoss', 'decode_harmonic_angle',
+    'induced_harmonic_action', 'normalize_harmonic'
+]
