@@ -1,0 +1,32 @@
+# GDA Plan-B P0c smoke: 8 training images, 1 epoch, fast sanity.
+# Gates: losses finite, chamber-bit accuracy rises above random (~50%),
+# envelope loss trend comparable to the baseline snap/envelope terms.
+_base_ = './orbdet_gda_probe_r50_dota1_grouped_ss_e0_gpu4.py'
+
+train_dataloader = dict(
+    num_workers=0,
+    persistent_workers=False,
+    dataset=dict(indices=8))
+
+train_cfg = dict(
+    type='EpochBasedTrainLoop', max_epochs=1, val_interval=999)
+
+param_scheduler = [
+    dict(
+        type='LinearLR',
+        start_factor=1.0 / 3,
+        by_epoch=False,
+        begin=0,
+        end=2)
+]
+
+default_hooks = dict(
+    logger=dict(type='LoggerHook', interval=1),
+    checkpoint=dict(
+        _delete_=True,
+        type='CheckpointHook',
+        interval=1,
+        max_keep_ckpts=1))
+
+work_dir = ('/data1/zcy/Orbdet/work_dirs/smoke/'
+            'orbdet_gda_probe_dota1_grouped_ss_e0_gpu4_20260904')
