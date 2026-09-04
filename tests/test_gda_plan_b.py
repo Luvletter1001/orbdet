@@ -237,46 +237,68 @@ def test_b_t6_head_parity_and_detach_isolation():
 
 # ---------------------------------------------------------------- B-T7
 
-def test_b_t7_compact_by_bid_rank():
+def test_b_t7_compacts_by_true_bid_identity_when_middle_object_is_missing():
     from mmrotate.models.detectors.orbdet_gda import compact_probe_by_object
-    # bid integers differ across views (parent accumulates the offset);
-    # identity is the rank of the bid integer within the view.
-    rows0 = torch.tensor([[1., 10.], [2., 20.], [3., 30.]])
-    bids0 = torch.tensor([1.2, 1.2, 2.2])  # obj0 twice, obj1 once
-    rows1 = torch.tensor([[4., 40.], [5., 50.], [6., 60.]])
-    bids1 = torch.tensor([5.4, 6.4, 6.4])  # obj0 once, obj1 twice
-    rows2 = torch.tensor([[7., 70.], [8., 80.]])
-    bids2 = torch.tensor([9.6, 10.6])      # obj0, obj1
-    ext0 = torch.tensor([[100., 0.1], [101., 0.1], [102., 0.2]])
-    ext1 = torch.tensor([[200., 0.3], [201., 0.4], [202., 0.4]])
-    ext2 = torch.tensor([[300., 0.5], [301., 0.6]])
+    # Parent-style ids share the integer object identity across views and use
+    # only the fractional suffix to encode ori/rot/flp.  Object 2 is absent
+    # from the rotated view; object 3 must not shift into object 2's rank.
+    rows0 = torch.tensor([[10.], [20.], [30.]])
+    bids0 = torch.tensor([1.2, 2.2, 3.2])
+    rows1 = torch.tensor([[100.], [300.]])
+    bids1 = torch.tensor([1.4, 3.4])
+    rows2 = torch.tensor([[1000.], [2000.], [3000.]])
+    bids2 = torch.tensor([1.6, 2.6, 3.6])
+    extras = [rows0.clone(), rows1.clone(), rows2.clone()]
 
-    rows3, ext3, keep = compact_probe_by_object(
-        [rows0, rows1, rows2], [bids0, bids1, bids2], [ext0, ext1, ext2])
-    assert keep == [0, 1]
-    assert rows3.shape == (2, 3, 2)
-    # obj0: mean of rows0[0:2], rows1[0], rows2[0]
-    assert torch.allclose(rows3[0, 0], torch.tensor([1.5, 15.]))
-    assert torch.allclose(rows3[0, 1], torch.tensor([4., 40.]))
-    assert torch.allclose(rows3[0, 2], torch.tensor([7., 70.]))
-    # extras are mean-pooled (point-independent per object in production)
-    assert ext3[0, 0, 0].item() == 100.5   # mean of [100, 101]
-    assert ext3[1, 1, 0].item() == 201.5   # mean of [201, 202]
+    rows3, ext3, keys = compact_probe_by_object(
+        [rows0, rows1, rows2], [bids0, bids1, bids2], extras)
 
-    # an object missing from one view is dropped (bcnt == 3)
-    rows3b, _, keep_b = compact_probe_by_object(
-        [rows0[:2], rows1, rows2[:1]],
-        [bids0[:2], bids1, bids2[:1]],
-        [ext0[:2], ext1, ext2[:1]])
-    assert keep_b == [0]
-    assert rows3b.shape == (1, 3, 2)
+    assert torch.equal(torch.as_tensor(keys), torch.tensor([1, 3]))
+    expected = torch.tensor([[10., 100., 1000.],
+                             [30., 300., 3000.]])
+    assert torch.equal(rows3.squeeze(-1), expected)
+    assert torch.equal(ext3.squeeze(-1), expected)
 
-    # empty intersection -> zero-sized tensors, no crash
-    rows3c, _, keep_c = compact_probe_by_object(
-        [rows0[:0], rows1, rows2],
-        [bids0[:0], bids1, bids2],
-        [ext0[:0], ext1, ext2])
-    assert keep_c == [] and rows3c.shape == (0, 3, 2)
+
+def test_b_t7_mean_pools_duplicate_points_without_losing_global_image_ids():
+    from mmrotate.models.detectors.orbdet_gda import compact_probe_by_object
+    # IDs 1/2 belong to image 0 and ID 3 belongs to image 1. Object 1 has two
+    # positive points per view; pooling must not merge or renumber images.
+    bids = [torch.tensor([1.2, 1.2, 2.2, 3.2]),
+            torch.tensor([1.4, 1.4, 2.4, 3.4]),
+            torch.tensor([1.6, 1.6, 2.6, 3.6])]
+    rows = [torch.tensor([[1.], [3.], [20.], [30.]]),
+            torch.tensor([[10.], [14.], [200.], [300.]]),
+            torch.tensor([[100.], [106.], [2000.], [3000.]])]
+    rows3, _, keys = compact_probe_by_object(rows, bids, rows)
+    assert torch.equal(torch.as_tensor(keys), torch.tensor([1, 2, 3]))
+    assert torch.equal(rows3[:, :, 0],
+                       torch.tensor([[2., 12., 103.],
+                                     [20., 200., 2000.],
+                                     [30., 300., 3000.]]))
+
+
+def test_b_t7_rebuilt_flip_ids_match_parent_integer_identity():
+    from mmengine.structures import InstanceData
+    from mmrotate.models.detectors.orbdet_gda import OrbdetGDADetector
+    from mmrotate.structures.bbox import RotatedBoxes
+
+    def _instances(n):
+        inst = InstanceData()
+        boxes = torch.tensor([[100. + i, 100., 20., 10., 0.]
+                              for i in range(n)])
+        inst.bboxes = RotatedBoxes(boxes)
+        inst.labels = torch.zeros(n, dtype=torch.long)
+        return inst
+
+    gt_ori = [_instances(2), _instances(1)]
+    gt_rot = [_instances(2), _instances(1)]
+    proxy = type('DetectorProxy', (), {'crop_size': (1024, 1024)})()
+    gt_flp = OrbdetGDADetector._rebuild_flipped_view(
+        proxy, gt_ori, gt_rot)
+
+    got = torch.cat([g.bid for g in gt_flp])
+    assert torch.allclose(got, torch.tensor([1.6, 2.6, 3.6]))
 
 
 # ---------------------------------------------------------------- B-T8

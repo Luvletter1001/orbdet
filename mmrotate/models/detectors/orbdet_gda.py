@@ -50,43 +50,57 @@ def compact_probe_by_object(
     Only objects with at least one positive point in *every* view are
     kept (mirrors the baseline's bcnt == 3 mask).
 
-    Note: the integer part of ``bid`` is globally unique per
-    (view, image, gt) because the parent accumulates the offset across
-    views -- the *same* physical object has *different* bid integers in
-    different views.  Object identity across views is therefore the rank
-    of the bid integer within the view's sorted unique bids (gt order is
-    preserved across views by the parent's deepcopy/flip).
+    The parent restarts its offset for every view.  Consequently the integer
+    part of ``bid`` is the stable physical-object identity across ori/rot/flp,
+    while the fractional suffix identifies the view (.2/.4/.6).  Matching by
+    identity, rather than by the rank of surviving ids, is essential when an
+    object has no positive point in one view.
 
     Fully vectorized: per view one ``torch.unique`` + one
     ``searchsorted`` + one ``index_reduce_`` (mirrors the baseline's
     own compaction idiom), no per-object Python/kernel loop.
     """
     n_views = len(rows_v)
-    pooled_r, pooled_e, n_obj_v = [], [], []
+    pooled_r, pooled_e, keys_v = [], [], []
     for v in range(n_views):
-        uniq = torch.unique(bids_v[v].long())
+        uniq, rank = torch.unique(
+            bids_v[v].long(), sorted=True, return_inverse=True)
         n_obj = uniq.numel()
-        n_obj_v.append(n_obj)
+        keys_v.append(uniq)
         if n_obj == 0:
-            pooled_r.append(rows_v[v].new_zeros((0, rows_v[v].size(1))))
-            pooled_e.append(extras_v[v].new_zeros((0, extras_v[v].size(1))))
+            # Keep empty local views connected to their upstream tensors so a
+            # later zero loss still participates in DDP autograd.
+            pooled_r.append(rows_v[v].sum(dim=0, keepdim=True)[:0])
+            pooled_e.append(extras_v[v].sum(dim=0, keepdim=True)[:0])
             continue
-        rank = torch.searchsorted(uniq, bids_v[v].long())
         pr = rows_v[v].new_zeros((n_obj, rows_v[v].size(1)))
         pr.index_reduce_(0, rank, rows_v[v], 'mean', include_self=False)
         pe = extras_v[v].new_zeros((n_obj, extras_v[v].size(1)))
         pe.index_reduce_(0, rank, extras_v[v], 'mean', include_self=False)
         pooled_r.append(pr)
         pooled_e.append(pe)
-    common = sorted(set.intersection(*[set(range(n)) for n in n_obj_v]))
+
+    common = keys_v[0]
+    for keys in keys_v[1:]:
+        if common.numel() == 0 or keys.numel() == 0:
+            common = common[:0]
+            continue
+        positions = torch.searchsorted(keys, common)
+        safe_positions = positions.clamp_max(keys.numel() - 1)
+        present = (positions < keys.numel()) \
+            & (keys[safe_positions] == common)
+        common = common[present]
+
     c = rows_v[0].size(1)
     e = extras_v[0].size(1)
-    if not common:
+    if common.numel() == 0:
         return (rows_v[0].new_zeros((0, n_views, c)),
-                extras_v[0].new_zeros((0, n_views, e)), [])
-    idx = torch.tensor(common, device=rows_v[0].device)
-    rows3 = torch.stack([pooled_r[v][idx] for v in range(n_views)], dim=1)
-    ext3 = torch.stack([pooled_e[v][idx] for v in range(n_views)], dim=1)
+                extras_v[0].new_zeros((0, n_views, e)), common)
+    indices = [torch.searchsorted(keys, common) for keys in keys_v]
+    rows3 = torch.stack(
+        [pooled_r[v][indices[v]] for v in range(n_views)], dim=1)
+    ext3 = torch.stack(
+        [pooled_e[v][indices[v]] for v in range(n_views)], dim=1)
     return rows3, ext3, common
 
 
@@ -111,17 +125,16 @@ class OrbdetGDADetector(OrbdetV02Detector):
                               gt_rot: InstanceList) -> InstanceList:
         """Reconstruct the flipped view exactly as the parent builds it.
 
-        Parent (H2RBoxV2Detector.loss): vertical flip of the cropped ori
-        gt, bids continue the global counter with a +0.6 fraction.
+        Parent (H2RBoxV2Detector.loss): vertical flip of the cropped ori gt;
+        integer ids restart from one and the view suffix is +0.6.
         """
         gt_flp = copy.deepcopy(gt_ori)
-        offset = 1 + sum(len(g.bboxes) for g in gt_ori) \
-            + sum(len(g.bboxes) for g in gt_rot)
-        device = gt_ori[0].bboxes.device if len(gt_ori) else 'cpu'
+        offset = 1
         for g in gt_flp:
             g.bboxes.flip_(self.crop_size, 'vertical')
             n = len(g.bboxes)
-            g.bid = torch.arange(0, n, 1, device=device) + offset + 0.6
+            g.bid = torch.arange(
+                0, n, 1, device=g.bboxes.device) + offset + 0.6
             offset += n
         return gt_flp
 
