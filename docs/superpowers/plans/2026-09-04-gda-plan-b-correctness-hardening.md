@@ -16,14 +16,14 @@
 - Create: `resultmd/exp_low_rank_orientation_evidence/gda_p1_invalid_diagnostic_20260904.md`
 - Create: `/data1/zcy/Orbdet/work_dirs/formal/orbdet_gda_probe_dota1_grouped_ss_e0_gpu4_seed3407/INVALID_DIAGNOSTIC`
 
-- [ ] **Step 1: Write the immutable result note**
+- [x] **Step 1: Write the immutable result note**
 
 Record the exact launch and stop timestamps, final process position, retained
 checkpoint, epoch-1-to-6 validation values, comparison confounds, and the two
 demonstrated correctness defects. State that the run cannot support positive
 or negative method claims.
 
-- [ ] **Step 2: Write the work-directory marker**
+- [x] **Step 2: Write the work-directory marker**
 
 The marker must contain:
 
@@ -35,7 +35,7 @@ last_scheduled_checkpoint: epoch_4.pth
 formal_resume_allowed: false
 ```
 
-- [ ] **Step 3: Verify the evidence against the preserved log**
+- [x] **Step 3: Verify the evidence against the preserved log**
 
 Run:
 
@@ -45,7 +45,7 @@ rtk rg -n 'dota/mAP:|Epoch\(train\).*\[7\]\[ 220/5373\]' /data1/zcy/Orbdet/work_
 
 Expected: six validation rows ending at `0.0756` and the epoch-7 iteration-220 row.
 
-- [ ] **Step 4: Commit only the repository result note**
+- [x] **Step 4: Commit only the repository result note**
 
 ```bash
 rtk git add resultmd/exp_low_rank_orientation_evidence/gda_p1_invalid_diagnostic_20260904.md
@@ -59,7 +59,7 @@ rtk git commit -m "docs: invalidate confounded GDA P1 run"
 - Modify: `mmrotate/models/detectors/orbdet_gda.py:32-90`
 - Modify: `mmrotate/models/detectors/orbdet_gda.py:110-126`
 
-- [ ] **Step 1: Replace B-T7 with production-identity regression tests**
+- [x] **Step 1: Replace B-T7 with production-identity regression tests**
 
 Use real parent-style IDs (`1.2/2.2/3.2`, `1.4/2.4/3.4`,
 `1.6/2.6/3.6`). Add a middle-missing case whose expected keys are `[1, 3]`
@@ -78,7 +78,7 @@ def test_b_t7_compacts_by_true_bid_identity_when_middle_object_is_missing():
 Add a detector helper test asserting rebuilt flip IDs are `[1.6, 2.6, ...]`
 rather than continuing after ori/rot IDs.
 
-- [ ] **Step 2: Run the new tests and verify RED**
+- [x] **Step 2: Run the new tests and verify RED**
 
 Run:
 
@@ -88,7 +88,7 @@ rtk env PYTHONNOUSERSITE=1 PYTHONPATH=. CUDA_VISIBLE_DEVICES='' /data/zcy/anacon
 
 Expected: FAIL showing rank-based `C/B/C` pairing and incorrect flip integers.
 
-- [ ] **Step 3: Implement on-device key intersection and parent flip IDs**
+- [x] **Step 3: Implement on-device key intersection and parent flip IDs**
 
 Pool by `bids.long()` and retain sorted keys. Compute membership with
 `torch.searchsorted`; gather each pooled tensor using the common true keys.
@@ -98,7 +98,7 @@ For an empty view, construct the empty pooled tensor from
 Reset flip `offset = 1`, increment across images exactly like
 `H2RBoxV2Detector.loss`, and allocate each `bid` on that image's bbox device.
 
-- [ ] **Step 4: Run B-T7 tests and the existing Plan-B suite**
+- [x] **Step 4: Run B-T7 tests and the existing Plan-B suite**
 
 Run:
 
@@ -108,7 +108,7 @@ rtk env PYTHONNOUSERSITE=1 PYTHONPATH=. CUDA_VISIBLE_DEVICES='' /data/zcy/anacon
 
 Expected: all Plan-B tests pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 rtk git add mmrotate/models/detectors/orbdet_gda.py tests/test_gda_plan_b.py
@@ -121,7 +121,7 @@ rtk git commit -m "fix: preserve GDA cross-view object identity"
 - Modify: `tests/test_gda_plan_b.py`
 - Modify: `mmrotate/models/losses/orbdet_gda_probe_losses.py:70-105`
 
-- [ ] **Step 1: Add exact-zero, near-zero, and extreme-scale tests**
+- [x] **Step 1: Add exact-zero, near-zero, and extreme-scale tests**
 
 Test `rows[..., 2:4] == 0`, radii on both sides of the safety threshold, and
 raw `t` values `[-100, -20, 0, 20, 100]`. Backpropagate the sum of all losses
@@ -134,12 +134,12 @@ assert all(torch.isfinite(v).all() for v in losses.values())
 assert torch.isfinite(rows.grad).all()
 ```
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run the new test alone. Expected: FAIL because zero `u2` has NaN gradients
 and extreme positive `t` overflows.
 
-- [ ] **Step 3: Implement bounded `t` and safe `u2` decode**
+- [x] **Step 3: Implement bounded `t` and safe `u2` decode**
 
 Add constructor parameters `t_min=-6.0`, `t_max=14.0`, and
 `u2_min_radius=1e-4`. Preserve local identity around zero with a two-sided
@@ -159,11 +159,11 @@ psi = torch.atan2(safe_y, safe_x)
 Expose detached `raw_t_min`, `raw_t_max`, `u2_radius_mean`, and
 `u2_fallback_frac` diagnostics from `forward`.
 
-- [ ] **Step 4: Verify GREEN and representation regressions**
+- [x] **Step 4: Verify GREEN and representation regressions**
 
 Run `tests/test_gda_plan_b.py` and `tests/test_gda_gate_a.py`. Expected: all pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 rtk git add mmrotate/models/losses/orbdet_gda_probe_losses.py tests/test_gda_plan_b.py
@@ -178,7 +178,7 @@ rtk git commit -m "fix: make GDA probe decode numerically finite"
 - Modify: `mmrotate/models/detectors/orbdet_gda.py:128-205`
 - Modify: `mmrotate/models/losses/orbdet_gda_probe_losses.py:124-228`
 
-- [ ] **Step 1: Add loss-contract tests**
+- [x] **Step 1: Add loss-contract tests**
 
 Add tests for an all-empty local `rows3` tensor that requires gradients, an
 orientation-agnostic object that contributes zero to all GDA terms, and
@@ -188,18 +188,18 @@ The two-process CPU/Gloo test must compare DDP-averaged local gradients with a
 single-process concatenated reference. One rank uses zero objects. Use a
 temporary file rendezvous and `torch.multiprocessing.spawn`; no CUDA or NCCL.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Expected failures: empty losses are disconnected, agnostic objects contribute,
 and rank-local means disagree with the global reference.
 
-- [ ] **Step 3: Pass object masks from detector to loss**
+- [x] **Step 3: Pass object masks from detector to loss**
 
 Append an `is_orientation_agnostic` extra per positive point using the head's
 existing `_get_rotation_agnostic_mask`. After identity compaction, form one
 object mask and pass it as `valid_object_mask` to `OrbdetGDAProbeLoss`.
 
-- [ ] **Step 4: Implement DDP-aware sum/count reduction**
+- [x] **Step 4: Implement DDP-aware sum/count reduction**
 
 Use `mmdet.utils.reduce_mean` on detached denominators. The differentiable
 formula is:
@@ -218,7 +218,7 @@ own valid element count. Eliminate Python `bool(mask.any())` and
 Add `rows3.sum() * 0` to every local numerator so all probe outputs remain in
 the graph on an empty rank. All ranks execute identical count collectives.
 
-- [ ] **Step 5: Verify GREEN**
+- [x] **Step 5: Verify GREEN**
 
 Run:
 
@@ -228,7 +228,7 @@ rtk env PYTHONNOUSERSITE=1 PYTHONPATH=. CUDA_VISIBLE_DEVICES='' /data/zcy/anacon
 
 Expected: all tests pass without hangs.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 rtk git add mmrotate/models/detectors/orbdet_gda.py mmrotate/models/losses/orbdet_gda_probe_losses.py tests/test_gda_plan_b.py tests/test_gda_ddp_reduction.py
@@ -241,7 +241,7 @@ rtk git commit -m "fix: normalize GDA losses across distributed objects"
 - Modify: `tests/test_gda_plan_b.py`
 - Modify: `mmrotate/models/dense_heads/h2rbox_gda_head.py:49-146`
 
-- [ ] **Step 1: Add inference-spy and initialization-parity tests**
+- [x] **Step 1: Add inference-spy and initialization-parity tests**
 
 Patch `gda_probe_tower.forward` with a counting wrapper. In `eval()` call the
 ordinary head forward and assert count zero and parent outputs bit-identical.
@@ -251,12 +251,12 @@ feature level.
 Reset the same seed before constructing a parent and child head without
 loading a state dict; require every shared state tensor to be equal.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Expected: ordinary eval executes the probe and same-seed shared initialization
 differs.
 
-- [ ] **Step 3: Preserve RNG and add the explicit analysis method**
+- [x] **Step 3: Preserve RNG and add the explicit analysis method**
 
 Construct probe modules inside `torch.random.fork_rng(devices=[])` so adding
 the branch does not advance the shared initialization stream. Only execute the
@@ -275,7 +275,7 @@ def forward_gda_probe(self, x: Tuple[Tensor]) -> List[Tensor]:
 
 This method is the only eval-time evidence path.
 
-- [ ] **Step 4: Verify GREEN and commit**
+- [x] **Step 4: Verify GREEN and commit**
 
 Run `tests/test_gda_plan_b.py`, then commit the head and tests with message
 `fix: isolate GDA probe analysis from prediction`.
@@ -287,23 +287,23 @@ Run `tests/test_gda_plan_b.py`, then commit the head and tests with message
 - Modify: `configs/orbdet/orbdet_gda_probe_r50_dota1_grouped_ss_e0_gpu4.py`
 - Create: `tests/test_gda_control_contract.py`
 
-- [ ] **Step 1: Add a failing configuration contract**
+- [x] **Step 1: Add a failing configuration contract**
 
 Load the E0, single-GPU control, and GDA configs with `mmengine.Config`.
 Require batch four for both single-GPU arms, identical optimizer/scheduler/data
 settings, and equal updates per epoch to the two-GPU E0 contract. Permit only
 model type/probe config and work directory to differ between control and GDA.
 
-- [ ] **Step 2: Verify RED because the control is absent and GDA uses batch two**
+- [x] **Step 2: Verify RED because the control is absent and GDA uses batch two**
 
-- [ ] **Step 3: Add the control and make GDA inherit it**
+- [x] **Step 3: Add the control and make GDA inherit it**
 
 The control inherits E0, overrides `train_dataloader.batch_size=4`, records
 `intended_world_size=1`, `global_batch_size=4`, and a distinct work directory.
 The GDA config inherits the control and changes only detector/head/probe fields
 and work directory. Do not change loss weights.
 
-- [ ] **Step 4: Verify GREEN and commit**
+- [x] **Step 4: Verify GREEN and commit**
 
 Run `tests/test_gda_control_contract.py`, then commit configs and test with
 message `test: freeze honest GDA single-GPU controls`.
@@ -314,19 +314,19 @@ message `test: freeze honest GDA single-GPU controls`.
 - Modify: `resultmd/exp_low_rank_orientation_evidence/gda_hardening_20260904/progress.md`
 - Modify: `resultmd/exp_low_rank_orientation_evidence/gda_hardening_20260904/findings.md`
 
-- [ ] **Step 1: Run the complete focused suite**
+- [x] **Step 1: Run the complete focused suite**
 
 ```bash
 rtk env PYTHONNOUSERSITE=1 PYTHONPATH=. CUDA_VISIBLE_DEVICES='' /data/zcy/anaconda3/envs/orbdet/bin/python -s -m pytest tests/test_gda_gate_a.py tests/test_gda_plan_b.py tests/test_gda_ddp_reduction.py tests/test_gda_control_contract.py -q
 ```
 
-- [ ] **Step 2: Run the existing relevant regression suite**
+- [x] **Step 2: Run the existing relevant regression suite**
 
 ```bash
 rtk env PYTHONNOUSERSITE=1 PYTHONPATH=. CUDA_VISIBLE_DEVICES='' /data/zcy/anaconda3/envs/orbdet/bin/python -s -m pytest tests/test_low_rank_orientation_evidence.py tests/test_collect_low_rank_orientation_evidence.py tests/test_report_low_rank_orientation_evidence.py tests/test_eval_filtered_orientation_map.py -q
 ```
 
-- [ ] **Step 3: Run static and repository checks**
+- [x] **Step 3: Run static and repository checks**
 
 ```bash
 rtk git diff --check
@@ -336,7 +336,7 @@ rtk git status --short
 Expected: no whitespace errors; unrelated pre-existing untracked planning
 files remain untouched and are listed separately from task changes.
 
-- [ ] **Step 4: Inspect the live system without starting training**
+- [x] **Step 4: Inspect the live system without starting training**
 
 ```bash
 rtk ps aux | rtk rg 'orbdet_gda_probe|tools/train.py' | rtk rg -v 'rg '
@@ -345,14 +345,13 @@ rtk nvidia-smi --query-compute-apps=pid,gpu_uuid,used_memory --format=csv,nohead
 
 Expected: no GDA P1 process. Other users' processes, if any, are not modified.
 
-- [ ] **Step 5: Update task records and commit**
+- [x] **Step 5: Update task records and commit**
 
 Record exact test counts and remaining risks. Commit only this task's
 `gda_hardening_20260904` records with message
 `docs: record GDA correctness hardening verification`.
 
-- [ ] **Step 6: Report residual limits**
+- [x] **Step 6: Report residual limits**
 
 State explicitly that no GPU memory smoke, gradient-calibration experiment, or
 formal training ran. Request separate authorization before any such run.
-
